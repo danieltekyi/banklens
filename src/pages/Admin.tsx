@@ -11,8 +11,22 @@ async function api(path: string, token = "", options: RequestInit = {}) {
     ...options,
     headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
   });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "Request failed");
+  const contentType = response.headers.get("content-type") || "";
+  let body: any;
+  if (contentType.includes("application/json")) {
+    try {
+      body = await response.json();
+    } catch (e) {
+      body = null;
+    }
+  } else {
+    // fallback to text for HTML or plain error messages
+    body = await response.text();
+  }
+  if (!response.ok) {
+    const message = typeof body === "string" && body ? body : (body && body.error) || response.statusText || "Request failed";
+    throw new Error(message);
+  }
   return body;
 }
 

@@ -1,0 +1,1 @@
+import type {Bank} from "../types";export default function BankBadge({bank}:{bank:Bank}){return <div className="bank-id"><span className="bank-logo" style={{background:bank.color}}>{bank.shortName}</span><div><b>{bank.name}</b><small>Updated {bank.updatedAt}</small></div></div>}

@@ -1,0 +1,32 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "banklens",
+	"main": "worker/index.ts",
+	"compatibility_date": "2026-08-01",
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "dist",
+		"not_found_handling": "single-page-application"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "banklens-db",
+			"database_id": "8a50f673-85de-4764-a4a0-8879f4c26049",
+			"migrations_dir": "../../migrations"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "REPORTS",
+			"bucket_name": "banklens-reports"
+		}
+	],
+	"triggers": {
+		"crons": [
+			"0 4 * * 1"
+		]
+	}
+}

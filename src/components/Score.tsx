@@ -1,0 +1,1 @@
+export default function Score({value}:{value:number}){const label=value>=85?'Strong':value>=75?'Good':'Watch';return <span className="score" title={`BankLens health score: ${value} out of 100`}>{value}<small>{label}</small></span>}

@@ -1,0 +1,1 @@
+{"compilerOptions":{"target":"ES2022","lib":["ES2022","WebWorker"],"strict":true,"module":"ESNext","moduleResolution":"Bundler","types":["@cloudflare/workers-types"],"noEmit":true,"skipLibCheck":true},"include":["worker","ENV.d.ts"]}

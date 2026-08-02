@@ -1,0 +1,1 @@
+interface Env { DB: D1Database; REPORTS: R2Bucket; ASSETS: Fetcher; ADMIN_API_KEY?: string; }

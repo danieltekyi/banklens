@@ -15,7 +15,7 @@
 			"binding": "DB",
 			"database_name": "banklens-db",
 			"database_id": "8a50f673-85de-4764-a4a0-8879f4c26049",
-			"migrations_dir": "../../migrations"
+			"migrations_dir": "migrations"
 		}
 	],
 	"r2_buckets": [

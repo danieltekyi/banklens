@@ -1,0 +1,4 @@
+UPDATE admin_users
+SET password_hash='100000:3e89b0b81c95293514774c95489d6d37:bca36f875d40b16b16344c8203d285d076a160559d02cbd36fb8dd575881816c',
+    updated_at=CURRENT_TIMESTAMP
+WHERE username='banklensadmin';

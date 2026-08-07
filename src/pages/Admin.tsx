@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+const ADMIN_RECOVERY_EMAIL = "sameultekyi@gmail.com";
+
 type Country = {
   id: number; name: string; iso2: string; currency: string;
   regulator_name: string; enabled: number; discovery_status: string;
@@ -34,8 +36,41 @@ export default function Admin() {
   const [token, setToken] = useState(localStorage.getItem("bl_admin") || "");
   const [username, setUsername] = useState("banklensadmin");
   const [password, setPassword] = useState("");
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get("reset") || "");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
 
   if (token) return <Console token={token} logout={() => { localStorage.removeItem("bl_admin"); setToken(""); }} />;
+
+  if (resetToken) return <section className="shell page auth-page">
+    <form className="auth-card" onSubmit={async (event) => {
+      event.preventDefault();
+      if (resetPassword.length < 12) {
+        alert("Use a password with at least 12 characters.");
+        return;
+      }
+      if (resetPassword !== resetConfirm) {
+        alert("The passwords do not match.");
+        return;
+      }
+      try {
+        await api("/api/auth/reset", "", { method: "POST", body: JSON.stringify({ token: resetToken, password: resetPassword }) });
+        setResetToken("");
+        setResetPassword("");
+        setResetConfirm("");
+        window.history.replaceState({}, "", "/admin");
+        alert("Password updated. Sign in with the new password.");
+      } catch (error) { alert(String(error)); }
+    }}>
+      <span className="brandmark">BL</span>
+      <h1>Reset password</h1>
+      <p>Use the secure link from your email to set a new admin password.</p>
+      <label>New password<input type="password" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} /></label>
+      <label>Confirm password<input type="password" value={resetConfirm} onChange={(e) => setResetConfirm(e.target.value)} /></label>
+      <button className="button">Update password</button>
+      <button type="button" className="text-button" onClick={() => { setResetToken(""); window.history.replaceState({}, "", "/admin"); }}>Back to sign in</button>
+    </form>
+  </section>;
 
   return <section className="shell page auth-page">
     <form className="auth-card" onSubmit={async (event) => {
@@ -53,9 +88,10 @@ export default function Admin() {
       <label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
       <button className="button">Sign in</button>
       <button type="button" className="text-button" onClick={async () => {
-        await api("/api/auth/forgot", "", { method: "POST", body: JSON.stringify({ email: "samueltekyi@gmail.com" }) });
-        alert("If email delivery is configured, reset instructions have been sent.");
+        await api("/api/auth/forgot", "", { method: "POST", body: JSON.stringify({ email: ADMIN_RECOVERY_EMAIL }) });
+        alert(`If the email is registered, a reset link has been sent to ${ADMIN_RECOVERY_EMAIL}.`);
       }}>Forgot password?</button>
+      <small>Recovery email: {ADMIN_RECOVERY_EMAIL}</small>
     </form>
   </section>;
 }
@@ -71,7 +107,7 @@ function Console({ token, logout }: { token: string; logout: () => void }) {
     <div className="section-head">
       <div><span className="kicker">Secure administration</span><h1>Smart discovery</h1><p className="lead">BankLens starts at each country's verified regulator, discovers licensed banks, then tracks official publications and contextual sources.</p></div>
       <div style={{display:'flex',gap:8}}>
-        <button onClick={async()=>{await api('/api/auth/forgot','',{method:'POST',body:JSON.stringify({email:'samueltekyi@gmail.com'})});alert('If email delivery is configured, reset instructions have been sent.')}} className="text-button small">Send password reset</button>
+        <button onClick={async()=>{await api('/api/auth/forgot','',{method:'POST',body:JSON.stringify({email:ADMIN_RECOVERY_EMAIL})});alert(`If email delivery is configured, reset instructions have been sent to ${ADMIN_RECOVERY_EMAIL}.`)}} className="text-button small">Send password reset</button>
         <button onClick={logout} className="button small">Sign out</button>
       </div>
     </div>
@@ -112,7 +148,7 @@ function Console({ token, logout }: { token: string; logout: () => void }) {
                           const percent = obj.total?Math.round((obj.checked/obj.total)*100):0;
                           setRunProgress(p=>({...p,[country.id]:{percent,message:obj.currentSourceId?`scanning ${obj.currentSourceId}`:'scanning',checked:obj.checked,total:obj.total,changed:obj.changed,failed:obj.failed}}));
                         } else if(obj.status==='discovered'){
-                          setRunProgress(p=>({...p,[country.id]:{percent:5,message:`discovered ${obj.linksFound} links`}}));
+                          setRunProgress(p=>({...p,[country.id]:{percent:5,message:`discovered ${obj.linksFound} links, imported ${obj.banksUpserted || 0} banks`}}));
                         } else if(obj.status==='done'){
                           setRunProgress(p=>({...p,[country.id]:{percent:100,message:'completed',checked:obj.scan.checked,total:obj.scan.total,changed:obj.scan.changed,failed:obj.scan.failed}}));
                         } else if(obj.status==='error'){

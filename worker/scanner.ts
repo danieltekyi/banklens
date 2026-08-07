@@ -24,7 +24,7 @@ export async function runScan(env: Env) {
 			await env.DB.prepare("INSERT INTO source_checks(source_id,status,checked_at,error) VALUES(?,?,?,?)").bind(source.id, "error", new Date().toISOString(), String(error)).run();
 		}
 	}
-	await env.DB.prepare("INSERT INTO scan_runs(started_at,finished_at,checked,changed,failed) VALUES(?,?,?,?,?)").bind(started, new Date().toISOString(), checked, changed, failed).run();
+	await env.DB.prepare("INSERT INTO scan_runs(started_at,finished_at,checked,changed,failed,country_id) VALUES(?,?,?,?,?,NULL)").bind(started, new Date().toISOString(), checked, changed, failed).run();
 	return { checked, changed, failed };
 }
 

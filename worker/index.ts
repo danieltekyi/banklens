@@ -16,6 +16,11 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+// Global error handler to ensure we return JSON for unexpected errors
+app.onError((err, c) => {
+  console.error(err);
+  return c.json({ error: String(err) }, 500);
+});
 app.use("/api/*", cors({ origin: "*" }));
 
 app.get("/api/health", (c) => c.json({ ok: true, time: new Date().toISOString() }));
@@ -40,14 +45,30 @@ app.get("/api/banks/:slug", async (c) => {
 });
 
 app.post("/api/auth/login", async (c) => {
-  const { username, password } = await c.req.json();
-  const u = await c.env.DB.prepare("SELECT * FROM admin_users WHERE username=?").bind(username).first<any>();
-  if (!u || !(await verifyPassword(password, u.password_hash))) return c.json({ error: "Invalid credentials" }, 401);
-  const raw = token();
-  const id = crypto.randomUUID();
-  const expires = new Date(Date.now() + 8 * 3600e3).toISOString();
-  await c.env.DB.prepare("INSERT INTO admin_sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)").bind(id, u.id, await digest(raw), expires).run();
-  return c.json({ token: raw, user: { username: u.username, email: u.email, mustChangePassword: !!u.must_change_password }, expiresAt: expires });
+  try {
+    // be defensive: read raw text then parse JSON to avoid unexpected parser errors
+    let body: any = {};
+    try {
+      const rawText = await c.req.text();
+      // debug: log raw body for parsing failures
+      console.log("RAW_BODY:", rawText);
+      body = rawText ? JSON.parse(rawText) : {};
+    } catch (parseErr) {
+      console.log("RAW_BODY_PARSE_ERROR:", String(parseErr));
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const { username, password } = body;
+    const u = await c.env.DB.prepare("SELECT * FROM admin_users WHERE username=?").bind(username).first<any>();
+    if (!u || !(await verifyPassword(password, u.password_hash))) return c.json({ error: "Invalid credentials" }, 401);
+    const raw = token();
+    const id = crypto.randomUUID();
+    const expires = new Date(Date.now() + 8 * 3600e3).toISOString();
+    await c.env.DB.prepare("INSERT INTO admin_sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)").bind(id, u.id, await digest(raw), expires).run();
+    return c.json({ token: raw, user: { username: u.username, email: u.email, mustChangePassword: !!u.must_change_password }, expiresAt: expires });
+  } catch (err) {
+    // return structured JSON error instead of plain 500 HTML
+    return c.json({ error: String(err) }, 500);
+  }
 });
 
 app.post("/api/auth/forgot", async (c) => {
@@ -55,6 +76,8 @@ app.post("/api/auth/forgot", async (c) => {
   const u = await c.env.DB.prepare("SELECT * FROM admin_users WHERE email=?").bind(email).first<any>();
   if (u) {
     const raw = token();
+    const resetUrl = new URL("/admin", c.req.url);
+    resetUrl.searchParams.set("reset", raw);
     await c.env.DB.prepare("INSERT INTO password_resets(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)").bind(crypto.randomUUID(), u.id, await digest(raw), new Date(Date.now() + 30 * 60e3).toISOString()).run();
     if (c.env.RESEND_API_KEY)
       await fetch("https://api.resend.com/emails", {
@@ -64,9 +87,10 @@ app.post("/api/auth/forgot", async (c) => {
           from: "BankLens <admin@tiwaak.com>",
           to: [u.email],
           subject: "Reset your BankLens password",
-          html: `<p>Use this one-time reset token:</p><p><b>${raw}</b></p><p>It expires in 30 minutes.</p>`,
+          html: `<p>Use this one-time reset link:</p><p><a href="${resetUrl.toString()}">${resetUrl.toString()}</a></p><p>It expires in 30 minutes.</p>`,
         }),
       });
+    else console.log("PASSWORD_RESET_URL", resetUrl.toString());
   }
   return c.json({ ok: true, message: "If the email is registered, a reset message will be sent." });
 });
@@ -122,7 +146,7 @@ app.post("/api/admin/countries/:id/run", async (c) => {
     try {
       await writer.write(encoder.encode(JSON.stringify({ status: "starting", countryId: id }) + "\n"));
       const disc = await discoverCountry(c.env, id);
-      await writer.write(encoder.encode(JSON.stringify({ status: "discovered", linksFound: disc.linksFound }) + "\n"));
+      await writer.write(encoder.encode(JSON.stringify({ status: "discovered", linksFound: disc.linksFound, banksUpserted: disc.banksUpserted }) + "\n"));
       const scanResult = await runScanForCountry(c.env, id, async (info) => {
         await writer.write(encoder.encode(JSON.stringify({ status: "scanning", ...info }) + "\n"));
       });

@@ -1,0 +1,1 @@
+UPDATE admin_users SET email='sameultekyi@gmail.com' WHERE username='banklensadmin';

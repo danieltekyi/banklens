@@ -68,6 +68,6 @@ curl -X POST http://localhost:5173/api/admin/scan -H "Authorization: Bearer chan
 
 ## Secure admin and smart discovery
 
-Open `/admin`. The migration creates the initial username `banklensadmin` and initial password `banklensadmin`, with `must_change_password=1`. Change it immediately. Recovery email is `samueltekyi@gmail.com`. Configure outgoing reset email with `npx wrangler secret put RESEND_API_KEY`. Never commit that key.
+Open `/admin`. The migration creates the initial username `banklensadmin` and initial password `banklensadmin`, with `must_change_password=1`. Change it immediately. Recovery email is `sameultekyi@gmail.com`. Configure outgoing reset email with `npx wrangler secret put RESEND_API_KEY`. Never commit that key.
 
 The crawler starts from each enabled country's verified central-bank directory. Ghana is seeded with the Bank of Ghana registered-banks page. Candidate financial reports, product/rate pages, news and review links are stored for review. It does not perform unrestricted crawling or auto-publish unverified values.

@@ -3,7 +3,6 @@ import { cors } from "hono/cors";
 import { demoBanks } from "./demo";
 import { listBanks, findBank } from "./db";
 import { runScan, runScanForCountry } from "./scanner";
-import { discoverCountry, runDiscovery } from "./discovery";
 import { digest, hashPassword, requireAdmin, token, verifyPassword } from "./auth";
 import { ensureBankLensSchema, ensureLatestMetrics } from "./schema";
 
@@ -40,25 +39,6 @@ app.use("/api/*", async (c, next) => {
 });
 
 app.get("/api/health", (c) => c.json({ ok: true, time: new Date().toISOString() }));
-
-app.get("/api/banks", async (c) => {
-  try {
-    const data = await listBanks(c.env.DB);
-    return c.json({ data: data.length ? data : demoBanks, meta: { demo: !data.length, updatedAt: new Date().toISOString() } });
-  } catch {
-    return c.json({ data: demoBanks, meta: { demo: true, updatedAt: new Date().toISOString() } });
-  }
-});
-
-app.get("/api/banks/:slug", async (c) => {
-  try {
-    const data = (await findBank(c.env.DB, c.req.param("slug"))) || demoBanks.find((x) => x.slug === c.req.param("slug"));
-    return data ? c.json({ data, meta: { demo: false, updatedAt: new Date().toISOString() } }) : c.json({ error: "Not found" }, 404);
-  } catch {
-    const data = demoBanks.find((x) => x.slug === c.req.param("slug"));
-    return data ? c.json({ data, meta: { demo: true, updatedAt: new Date().toISOString() } }) : c.json({ error: "Not found" }, 404);
-  }
-});
 
 app.post("/api/auth/login", async (c) => {
   try {
@@ -131,223 +111,179 @@ app.use("/api/admin/*", async (c, next) => {
   await next();
 });
 
+const GHANA_BANKS = [
+  ["GCB Bank PLC", "gcb-bank", "https://www.gcbbank.com.gh/group-results-and-reporting"],
+  ["Ecobank Ghana PLC", "ecobank-ghana", "https://www.ecobank.com/group/investor-relations/annual-reports/subsidiary-annual-reports"],
+  ["Absa Bank Ghana", "absa-bank-ghana", "https://www.absa.com.gh/reports/"],
+  ["Standard Chartered Bank Ghana PLC", "standard-chartered-ghana", "https://www.sc.com/gh/about-us/investor-relations/"],
+  ["Stanbic Bank Ghana", "stanbic-bank-ghana", "https://www.stanbicbank.com.gh/gh/personal/about-us/financial-results"],
+  ["Fidelity Bank Ghana", "fidelity-bank-ghana", "https://www.fidelitybank.com.gh/about-us/financial-reports"],
+  ["CalBank PLC", "calbank", "https://ir.calbank.net/financials/results/"],
+  ["Agricultural Development Bank (ADB) PLC", "adb-ghana", "https://www.agricbank.com/investor-relations/financial-reports/"],
+  ["Societe Generale Ghana PLC", "societe-generale-ghana", "https://societegenerale.com.gh/en/your-bank/investor-relations/annual-reports/"],
+  ["Zenith Bank Ghana", "zenith-bank-ghana", "https://www.zenithbank.com.gh/about-us/financial-report/"],
+  ["Consolidated Bank Ghana (CBG)", "cbg-ghana", "https://www.cbg.com.gh/documents/annual-financial-reports"],
+  ["Guaranty Trust Bank (GTBank) Ghana", "gtbank-ghana", "https://www.gtbankghana.com/about-us/financial-reports"],
+  ["United Bank for Africa (UBA) Ghana", "uba-ghana", "https://www.ubaghana.com/about-us/financial-reports/"],
+  ["Bank of Africa Ghana (BOA)", "boa-ghana", "https://boaghana.com/about-boa/financial-statements/"],
+] as const;
+
+app.get("/api/countries", async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT id,name,iso2,currency FROM countries WHERE enabled=1 ORDER BY name").all();
+  return c.json({ data: results });
+});
+
+app.get("/api/banks", async (c) => {
+  try {
+    const countryId = c.req.query("country") ? Number(c.req.query("country")) : undefined;
+    const data = await listBanks(c.env.DB, countryId);
+    return c.json({ data: data.length ? data : demoBanks, meta: { demo: !data.length, updatedAt: new Date().toISOString() } });
+  } catch {
+    return c.json({ data: demoBanks, meta: { demo: true, updatedAt: new Date().toISOString() } });
+  }
+});
+
+app.get("/api/banks/:slug", async (c) => {
+  try {
+    const data = (await findBank(c.env.DB, c.req.param("slug"))) || demoBanks.find((x) => x.slug === c.req.param("slug"));
+    return data ? c.json({ data, meta: { demo: false, updatedAt: new Date().toISOString() } }) : c.json({ error: "Not found" }, 404);
+  } catch {
+    const data = demoBanks.find((x) => x.slug === c.req.param("slug"));
+    return data ? c.json({ data, meta: { demo: true, updatedAt: new Date().toISOString() } }) : c.json({ error: "Not found" }, 404);
+  }
+});
+
+app.get("/api/banks/:slug/trends", async (c) => {
+  const bank = await c.env.DB.prepare("SELECT id,name FROM banks WHERE slug=? AND active=1").bind(c.req.param("slug")).first<any>();
+  if (!bank) return c.json({ error:"Bank not found" },404);
+  const from=c.req.query("from")||"1900-01-01", to=c.req.query("to")||"2999-12-31";
+  const {results}=await c.env.DB.prepare(`SELECT metric_key,metric_label,value,unit,currency,reporting_period_start,reporting_period_end,period_label,source_url,source_title FROM financial_records WHERE bank_id=? AND status='published' AND COALESCE(reporting_period_end,'9999-12-31') BETWEEN ? AND ? ORDER BY reporting_period_end ASC,metric_key ASC`).bind(bank.id,from,to).all();
+  return c.json({data:results,meta:{bankId:bank.id,bankName:bank.name,from,to}});
+});
+
+app.get("/api/banks/:slug/analysis", async (c) => {
+  const row=await c.env.DB.prepare(`SELECT b.id,b.name,b.health_score,b.summary,a.strengths_json,a.weaknesses_json,a.generated_at FROM banks b LEFT JOIN bank_analysis a ON a.bank_id=b.id WHERE b.slug=? AND b.active=1`).bind(c.req.param("slug")).first<any>();
+  if(!row)return c.json({error:"Bank not found"},404);
+  return c.json({data:{bankId:row.id,name:row.name,healthScore:row.health_score,summary:row.summary,strengths:JSON.parse(row.strengths_json||"[]"),weaknesses:JSON.parse(row.weaknesses_json||"[]"),generatedAt:row.generated_at||null}});
+});
+
+app.get("/api/compare/rankings", async (c) => {
+  const countryId=c.req.query("country")?Number(c.req.query("country")):undefined;
+  const metric=c.req.query("metric")||"health_score";
+  const from=c.req.query("from")||"1900-01-01",to=c.req.query("to")||"2999-12-31";
+  if(metric === "health_score") {
+    const q=countryId?c.env.DB.prepare("SELECT b.id,b.slug,b.name,b.health_score value,c.name country_name FROM banks b JOIN countries c ON c.id=b.country_id WHERE b.active=1 AND b.country_id=? ORDER BY b.health_score DESC,b.name").bind(countryId):c.env.DB.prepare("SELECT b.id,b.slug,b.name,b.health_score value,c.name country_name FROM banks b JOIN countries c ON c.id=b.country_id WHERE b.active=1 ORDER BY b.health_score DESC,b.name");
+    const {results}=await q.all(); return c.json({data:results.map((x:any,i:number)=>({...x,rank:i+1}))});
+  }
+  const params:any[]=[metric,from,to];
+  let sql=`SELECT fr.bank_id,b.slug,b.name,c.name country_name,fr.value,fr.unit,fr.reporting_period_end,fr.period_label,fr.source_url FROM financial_records fr JOIN banks b ON b.id=fr.bank_id JOIN countries c ON c.id=b.country_id WHERE fr.status='published' AND fr.metric_key=? AND COALESCE(fr.reporting_period_end,'9999-12-31') BETWEEN ? AND ?`;
+  if(countryId){sql+=" AND b.country_id=?";params.push(countryId);}
+  sql+=" ORDER BY fr.reporting_period_end DESC,fr.id DESC";
+  const {results}=await c.env.DB.prepare(sql).bind(...params).all<any>();
+  const latest=new Map<number,any>(); for(const row of results){if(!latest.has(Number(row.bank_id)))latest.set(Number(row.bank_id),row);}
+  const rows=[...latest.values()]; rows.sort((a,b)=>Number(b.value)-Number(a.value));
+  return c.json({data:rows.map((x,i)=>({...x,rank:i+1}))});
+});
+
 app.get("/api/admin/countries", async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT c.*,(SELECT COUNT(*) FROM banks b WHERE b.country_id=c.id) bank_count,(SELECT COUNT(*) FROM discovered_links d WHERE d.country_id=c.id AND d.status='new') review_count FROM countries c ORDER BY name").all();
+  const { results } = await c.env.DB.prepare(`SELECT c.*,
+    (SELECT COUNT(*) FROM banks b WHERE b.country_id=c.id AND b.active=1) bank_count,
+    (SELECT COUNT(*) FROM sources s JOIN banks b ON b.id=s.bank_id WHERE b.country_id=c.id AND b.active=1 AND s.active=1 AND s.source_type='financial_portal') source_count,
+    (SELECT COUNT(*) FROM financial_documents d JOIN banks b ON b.id=d.bank_id WHERE b.country_id=c.id AND d.status='published') report_count,
+    (SELECT MAX(sr.checked_at) FROM source_checks sr JOIN sources s ON s.id=sr.source_id JOIN banks b ON b.id=s.bank_id WHERE b.country_id=c.id) last_scan_at
+    FROM countries c ORDER BY name`).all();
   return c.json({ data: results });
 });
 
 app.post("/api/admin/countries", async (c) => {
-  const x = await c.req.json();
-  if (!x.name || !x.iso2 || !x.currency || !x.regulatorUrl || !x.bankDirectoryUrl) return c.json({ error: "Missing required fields" }, 400);
-  await c.env.DB.prepare("INSERT INTO countries(name,iso2,currency,regulator_name,regulator_url,bank_directory_url,enabled) VALUES(?,?,?,?,?,?,0)").bind(x.name, x.iso2.toUpperCase(), x.currency.toUpperCase(), x.regulatorName || `${x.name} central bank`, x.regulatorUrl, x.bankDirectoryUrl).run();
-  return c.json({ ok: true }, 201);
+  const x=await c.req.json();
+  if(!x.name||!x.iso2||!x.currency)return c.json({error:"Country name, ISO2 and currency are required"},400);
+  const existing=await c.env.DB.prepare("SELECT id FROM countries WHERE iso2=?").bind(String(x.iso2).toUpperCase()).first<any>();
+  if(existing)return c.json({error:"Country already exists",id:existing.id},409);
+  await c.env.DB.prepare("INSERT INTO countries(name,iso2,currency,regulator_name,regulator_url,bank_directory_url,enabled) VALUES(?,?,?,?,?,?,?)").bind(x.name,String(x.iso2).toUpperCase(),String(x.currency).toUpperCase(),x.regulatorName||`${x.name} central bank`,x.regulatorUrl||"",x.bankDirectoryUrl||"",x.enabled===false?0:1).run();
+  const row=await c.env.DB.prepare("SELECT id FROM countries WHERE iso2=?").bind(String(x.iso2).toUpperCase()).first<any>();
+  return c.json({ok:true,id:row?.id},201);
 });
 
 app.patch("/api/admin/countries/:id", async (c) => {
-  const { enabled } = await c.req.json();
-  await c.env.DB.prepare("UPDATE countries SET enabled=? WHERE id=?").bind(enabled ? 1 : 0, c.req.param("id")).run();
-  return c.json({ ok: true });
+  const { enabled }=await c.req.json(); await c.env.DB.prepare("UPDATE countries SET enabled=? WHERE id=?").bind(enabled?1:0,Number(c.req.param("id"))).run(); return c.json({ok:true});
 });
 
-app.post("/api/admin/countries/:id/discover", async (c) => c.json(await discoverCountry(c.env, Number(c.req.param("id")))));
-
-// Streaming endpoint to run discovery + country scan and emit progress lines (JSON per line)
-app.post("/api/admin/countries/:id/run", async (c) => {
-  const id = Number(c.req.param("id"));
-  const encoder = new TextEncoder();
-  const stream = new TransformStream();
-  const writer = stream.writable.getWriter();
-
-  (async () => {
-    try {
-      await writer.write(encoder.encode(JSON.stringify({ status: "starting", countryId: id }) + "\n"));
-      const disc = await discoverCountry(c.env, id);
-      await writer.write(encoder.encode(JSON.stringify({ status: "discovered", linksFound: disc.linksFound, banksUpserted: disc.banksUpserted }) + "\n"));
-      const scanResult = await runScanForCountry(c.env, id, async (info) => {
-        await writer.write(encoder.encode(JSON.stringify({ status: "scanning", ...info }) + "\n"));
-      });
-      await writer.write(encoder.encode(JSON.stringify({ status: "done", scan: scanResult }) + "\n"));
-    } catch (error) {
-      await writer.write(encoder.encode(JSON.stringify({ status: "error", message: String(error) }) + "\n"));
-    } finally {
-      writer.close();
-    }
-  })();
-
-  return new Response(stream.readable, { headers: { "Content-Type": "text/event-stream" } });
+app.get("/api/admin/countries/:id/config", async (c) => {
+  const countryId=Number(c.req.param("id"));
+  const country=await c.env.DB.prepare("SELECT * FROM countries WHERE id=?").bind(countryId).first<any>();
+  if(!country)return c.json({error:"Country not found"},404);
+  const {results:banks}=await c.env.DB.prepare("SELECT id,name,slug,website,short_name,color,health_score,active FROM banks WHERE country_id=? ORDER BY name").bind(countryId).all();
+  const {results:sources}=await c.env.DB.prepare(`SELECT s.id,s.bank_id,s.url,s.source_type,s.active, b.name bank_name FROM sources s JOIN banks b ON b.id=s.bank_id WHERE b.country_id=? ORDER BY b.name,s.url`).bind(countryId).all();
+  return c.json({country,banks,sources});
 });
 
-app.get("/api/admin/reviews", async (c) => {
-  const status = c.req.query("status") || "pending";
-  const { results } = await c.env.DB.prepare(
-    `SELECT fr.*, b.name bank_name, c.name country_name
-     FROM financial_records fr
-     JOIN banks b ON b.id=fr.bank_id
-     JOIN countries c ON c.id=b.country_id
-     WHERE (?='all' OR fr.status=?)
-     ORDER BY COALESCE(fr.reporting_period_end, fr.created_at) DESC, fr.bank_id, fr.metric_key
-     LIMIT 1000`,
-  ).bind(status, status).all();
-  const { results: links } = await c.env.DB.prepare(
-    `SELECT d.*, c.name country_name
-     FROM discovered_links d
-     JOIN countries c ON c.id=d.country_id
-     WHERE (?='all' OR d.status=?)
-     ORDER BY d.discovered_at DESC LIMIT 500`,
-  ).bind(status === "pending" ? "new" : "all", status === "pending" ? "new" : "all").all();
-  const { results: banks } = await c.env.DB.prepare(
-    "SELECT id,name,country_id FROM banks WHERE active=1 ORDER BY name"
-  ).all();
-  return c.json({ data: results, sources: links, banks });
+app.post("/api/admin/countries/:id/banks", async (c) => {
+  const countryId=Number(c.req.param("id")); const x=await c.req.json();
+  if(!x.name)return c.json({error:"Bank name is required"},400);
+  const slug=String(x.slug||x.name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+  const existing=await c.env.DB.prepare("SELECT id FROM banks WHERE slug=?").bind(slug).first<any>(); if(existing)return c.json({error:"A bank with this slug already exists"},409);
+  await c.env.DB.prepare("INSERT INTO banks(slug,name,short_name,color,health_score,summary,active,country_id,website,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(slug,x.name,x.shortName||String(x.name).slice(0,3).toUpperCase(),x.color||"hsl(210 55% 42%)",0,"Financial profile is being built from configured official reports.",1,countryId,x.website||null,new Date().toISOString()).run();
+  const bank=await c.env.DB.prepare("SELECT id,slug,name FROM banks WHERE slug=?").bind(slug).first<any>();
+  if(x.sourceUrl) await c.env.DB.prepare("INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)").bind(bank.id,x.sourceUrl,"financial_portal").run();
+  return c.json({ok:true,bank},201);
 });
 
-app.get("/api/admin/review", async (c) => {
-  const { results } = await c.env.DB.prepare(
-    "SELECT d.*,c.name country_name FROM discovered_links d JOIN countries c ON c.id=d.country_id ORDER BY d.discovered_at DESC LIMIT 200",
-  ).all();
-  return c.json({ data: results });
+app.patch("/api/admin/banks/:id", async (c) => {
+  const id=Number(c.req.param("id")); const x=await c.req.json();
+  await c.env.DB.prepare("UPDATE banks SET name=?,short_name=?,website=?,active=?,updated_at=? WHERE id=?").bind(x.name,x.shortName||String(x.name||"").slice(0,3).toUpperCase(),x.website||null,x.active===false?0:1,new Date().toISOString(),id).run(); return c.json({ok:true});
 });
 
-app.post("/api/admin/reviews/:id/:action", async (c) => {
-  const id = Number(c.req.param("id"));
-  const action = c.req.param("action");
-  if (!Number.isFinite(id) || !["approve", "reject"].includes(action)) return c.json({ error: "Invalid review action" }, 400);
-  const body = await c.req.json().catch(() => ({}));
-  const user = await requireAdmin(c.req.raw, c.env.DB);
-  if (!user) return c.json({ error: "Unauthorized" }, 401);
+app.post("/api/admin/banks/:id/sources", async (c) => {
+  const bankId=Number(c.req.param("id")); const x=await c.req.json();
+  if(!x.url)return c.json({error:"Financial reporting URL is required"},400);
+  const bank=await c.env.DB.prepare("SELECT id FROM banks WHERE id=? AND active=1").bind(bankId).first<any>(); if(!bank)return c.json({error:"Bank not found"},404);
+  const existing=await c.env.DB.prepare("SELECT id FROM sources WHERE bank_id=? AND url=?").bind(bankId,x.url).first<any>();
+  if(existing){await c.env.DB.prepare("UPDATE sources SET active=1,source_type='financial_portal' WHERE id=?").bind(existing.id).run();return c.json({ok:true,id:existing.id});}
+  await c.env.DB.prepare("INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)").bind(bankId,x.url,"financial_portal").run();
+  const row=await c.env.DB.prepare("SELECT id FROM sources WHERE bank_id=? AND url=?").bind(bankId,x.url).first<any>(); return c.json({ok:true,id:row?.id},201);
+});
 
-  const record = await c.env.DB.prepare("SELECT * FROM financial_records WHERE id=?").bind(id).first<any>();
-  if (!record) return c.json({ error: "Financial review item not found" }, 404);
+app.delete("/api/admin/sources/:id", async (c) => { await c.env.DB.prepare("UPDATE sources SET active=0 WHERE id=?").bind(Number(c.req.param("id"))).run(); return c.json({ok:true}); });
 
-  const now = new Date().toISOString();
-  if (action === "reject") {
-    await c.env.DB.prepare(
-      "UPDATE financial_records SET status='rejected',review_note=?,reviewed_by=?,reviewed_at=?,updated_at=? WHERE id=?",
-    ).bind(body.note || null, user.username || user.email || String(user.id), now, now, id).run();
-    return c.json({ ok: true, status: "rejected" });
+app.post("/api/admin/ghana-starter", async (c) => {
+  const now=new Date().toISOString();
+  let country=await c.env.DB.prepare("SELECT id FROM countries WHERE iso2='GH'").first<any>();
+  if(!country){
+    await c.env.DB.prepare("INSERT INTO countries(name,iso2,currency,regulator_name,regulator_url,bank_directory_url,enabled) VALUES(?,?,?,?,?,?,1)").bind("Ghana","GH","GHS","Bank of Ghana","https://www.bog.gov.gh/","",1).run();
+    country=await c.env.DB.prepare("SELECT id FROM countries WHERE iso2='GH'").first<any>();
   }
-
-  await c.env.DB.prepare(
-    "UPDATE financial_records SET status='approved',review_note=?,reviewed_by=?,reviewed_at=?,updated_at=? WHERE id=?",
-  ).bind(body.note || null, user.username || user.email || String(user.id), now, now, id).run();
-
-  // Rebuild the public latest snapshot for this bank from approved records for
-  // the newest reporting period. Historical records remain untouched.
-  const latest = await c.env.DB.prepare(
-    `SELECT metric_key,value,unit,reporting_period_end,period_label
-     FROM financial_records
-     WHERE bank_id=? AND status='approved'
-     ORDER BY COALESCE(reporting_period_end,'0000-00-00') DESC, id DESC`,
-  ).bind(record.bank_id).all<any>();
-
-  const snapshot: any = { bank_id: record.bank_id, assets:null, deposits:null, profit:null, capital_adequacy:null, liquidity:null, npl:null, reporting_period:null, reporting_period_end:null, updated_at:now };
-  for (const row of latest.results || []) {
-    if (snapshot[row.metric_key] == null) {
-      snapshot[row.metric_key] = row.value;
-      snapshot.reporting_period = row.period_label;
-      snapshot.reporting_period_end = row.reporting_period_end;
+  let banksAdded=0, sourcesAdded=0;
+  for(const [name,slug,url] of GHANA_BANKS){
+    let bank=await c.env.DB.prepare("SELECT id FROM banks WHERE slug=?").bind(slug).first<any>();
+    if(!bank){
+      await c.env.DB.prepare("INSERT INTO banks(slug,name,short_name,color,health_score,summary,active,country_id,website,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(slug,name,name.split(/\s+/).map((x:string)=>x[0]).join("").slice(0,3).toUpperCase(),"hsl(210 55% 42%)",0,"Financial profile is being built from configured official reports.",1,country.id,new URL(url).origin,now).run();
+      bank=await c.env.DB.prepare("SELECT id FROM banks WHERE slug=?").bind(slug).first<any>(); banksAdded++;
     }
+    const source=await c.env.DB.prepare("SELECT id FROM sources WHERE bank_id=? AND url=?").bind(bank.id,url).first<any>();
+    if(!source){await c.env.DB.prepare("INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)").bind(bank.id,url,"financial_portal").run(); sourcesAdded++;}
   }
-
-  const cols = await c.env.DB.prepare("PRAGMA table_info(latest_metrics)").all<any>();
-  const available = new Set((cols.results || []).map((x: any) => x.name));
-  const names = ["bank_id","assets","deposits","profit","capital_adequacy","liquidity","npl","reporting_period","reporting_period_end","updated_at"]
-    .filter(name => available.has(name));
-  const values: any = {
-    bank_id:snapshot.bank_id, assets:snapshot.assets, deposits:snapshot.deposits, profit:snapshot.profit,
-    capital_adequacy:snapshot.capital_adequacy, liquidity:snapshot.liquidity, npl:snapshot.npl,
-    reporting_period:snapshot.reporting_period, reporting_period_end:snapshot.reporting_period_end, updated_at:now
-  };
-  await c.env.DB.prepare("DELETE FROM latest_metrics WHERE bank_id=?").bind(record.bank_id).run();
-  const marks = names.map(() => "?").join(",");
-  await c.env.DB.prepare(`INSERT INTO latest_metrics(${names.join(",")}) VALUES(${marks})`)
-    .bind(...names.map(n => values[n])).run();
-
-  return c.json({ ok: true, status: "approved", published: true, latest: snapshot });
+  return c.json({ok:true,countryId:country.id,banksAdded,sourcesAdded});
 });
 
-app.post("/api/admin/source-reviews/:id/:action", async (c) => {
-  const id = Number(c.req.param("id"));
-  const action = c.req.param("action");
-  if (!Number.isFinite(id) || !["approve", "reject"].includes(action)) return c.json({ error: "Invalid review action" }, 400);
-  const row = await c.env.DB.prepare("SELECT * FROM discovered_links WHERE id=?").bind(id).first<any>();
-  if (!row) return c.json({ error: "Discovered source not found" }, 404);
-  if (action === "reject") {
-    await c.env.DB.prepare("UPDATE discovered_links SET status='rejected' WHERE id=?").bind(id).run();
-    return c.json({ ok: true, status: "rejected" });
-  }
-
-  await c.env.DB.prepare("UPDATE discovered_links SET status='approved' WHERE id=?").bind(id).run();
-
-  let sourceAdded = false;
-  let bankId: number | null = body.bankId ? Number(body.bankId) : null;
-  try {
-    const hostname = new URL(row.url).hostname.replace(/^www\./, "").toLowerCase();
-    let bank: any = null;
-    if (bankId) {
-      bank = await c.env.DB.prepare("SELECT id FROM banks WHERE id=? AND country_id=? AND active=1")
-        .bind(bankId, row.country_id).first<any>();
-      if (!bank) bankId = null;
-    }
-    if (!bank) {
-      const { results: banks } = await c.env.DB.prepare(
-        "SELECT id,website FROM banks WHERE country_id=? AND active=1 AND website IS NOT NULL",
-      ).bind(row.country_id).all<any>();
-      bank = banks.find((b: any) => {
-        try { return new URL(b.website).hostname.replace(/^www\./,"").toLowerCase() === hostname; }
-        catch { return false; }
-      });
-      if (bank) bankId = bank.id;
-    }
-    if (bank) {
-      const existing = await c.env.DB.prepare(
-        "SELECT id FROM sources WHERE bank_id=? AND url=? LIMIT 1",
-      ).bind(bank.id, row.url).first<any>();
-      if (existing) {
-        await c.env.DB.prepare("UPDATE sources SET active=1,source_type=? WHERE id=?")
-          .bind(row.kind || "financial", existing.id).run();
-      } else {
-        await c.env.DB.prepare(
-          "INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)",
-        ).bind(bank.id, row.url, row.kind || "financial").run();
-      }
-      sourceAdded = true;
-    }
-  } catch {}
-
-  return c.json({ ok: true, status: "approved", sourceAdded, bankId });
+app.post("/api/admin/countries/:id/analyze", async (c) => {
+  const id=Number(c.req.param("id")); const encoder=new TextEncoder(); const stream=new TransformStream(); const writer=stream.writable.getWriter();
+  (async()=>{try{
+    await writer.write(encoder.encode(JSON.stringify({status:"starting",countryId:id})+"\n"));
+    const result=await runScanForCountry(c.env,id,async(info)=>{await writer.write(encoder.encode(JSON.stringify(info)+"\n"));});
+    await writer.write(encoder.encode(JSON.stringify({status:"done",result})+"\n"));
+  }catch(error){await writer.write(encoder.encode(JSON.stringify({status:"error",message:String(error)})+"\n"));}finally{writer.close();}})();
+  return new Response(stream.readable,{headers:{"Content-Type":"text/event-stream","Cache-Control":"no-cache"}});
 });
 
-app.get("/api/banks/:slug/trends", async (c) => {
-  const slug = c.req.param("slug");
-  const from = c.req.query("from") || "1900-01-01";
-  const to = c.req.query("to") || "2999-12-31";
-  const bank = await c.env.DB.prepare("SELECT id,name,slug FROM banks WHERE slug=? AND active=1").bind(slug).first<any>();
-  if (!bank) return c.json({ error: "Bank not found" }, 404);
-  const { results } = await c.env.DB.prepare(
-    `SELECT metric_key,metric_label,value,unit,currency,reporting_period_start,reporting_period_end,period_label,source_url,source_title
-     FROM financial_records
-     WHERE bank_id=? AND status='approved'
-       AND COALESCE(reporting_period_end,'9999-12-31') BETWEEN ? AND ?
-     ORDER BY reporting_period_end ASC, metric_key ASC`,
-  ).bind(bank.id, from, to).all();
-  return c.json({ data: results, meta: { bankId: bank.id, bankName: bank.name, from, to } });
-});
+// Legacy discovery endpoint is intentionally disabled. BankLens now scans only administrator-configured financial portals.
+app.post("/api/admin/countries/:id/discover", async (c) => c.json({error:"Automatic discovery is disabled. Add each bank and its official financial-report portal in Admin."},410));
 
-app.get("/api/compare/trends", async (c) => {
-  const slugs = (c.req.query("banks") || "").split(",").map(x => x.trim()).filter(Boolean).slice(0,10);
-  const from = c.req.query("from") || "1900-01-01";
-  const to = c.req.query("to") || "2999-12-31";
-  if (!slugs.length) return c.json({ data: [] });
-  const placeholders = slugs.map(() => "?").join(",");
-  const { results } = await c.env.DB.prepare(
-    `SELECT b.slug,b.name,fr.metric_key,fr.metric_label,fr.value,fr.unit,fr.reporting_period_end,fr.period_label
-     FROM financial_records fr JOIN banks b ON b.id=fr.bank_id
-     WHERE fr.status='approved' AND b.slug IN (${placeholders})
-       AND COALESCE(fr.reporting_period_end,'9999-12-31') BETWEEN ? AND ?
-     ORDER BY fr.reporting_period_end ASC,b.name,fr.metric_key`,
-  ).bind(...slugs, from, to).all();
-  return c.json({ data: results, meta: { from, to } });
+app.get("/api/admin/audit", async (c) => {
+  const limit=Math.min(1000,Math.max(50,Number(c.req.query("limit")||500)));
+  const {results:reports}=await c.env.DB.prepare(`SELECT d.id,d.report_title,d.report_url,d.reporting_period_end,d.period_label,d.processed_at,d.status,b.name bank_name,c.name country_name FROM financial_documents d JOIN banks b ON b.id=d.bank_id JOIN countries c ON c.id=b.country_id ORDER BY d.processed_at DESC LIMIT ${limit}`).all();
+  const {results:metrics}=await c.env.DB.prepare(`SELECT fr.bank_id,b.name bank_name,c.name country_name,fr.metric_label,fr.value,fr.unit,fr.period_label,fr.reporting_period_end,fr.source_url,fr.source_title FROM financial_records fr JOIN banks b ON b.id=fr.bank_id JOIN countries c ON c.id=b.country_id WHERE fr.status='published' ORDER BY fr.reporting_period_end DESC,fr.id DESC LIMIT ${limit}`).all();
+  return c.json({reports,metrics});
 });
 
 app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));
@@ -355,6 +291,6 @@ app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));
 export default {
   fetch: app.fetch,
   async scheduled(_controller: ScheduledController, env: Bindings, ctx: ExecutionContext) {
-    ctx.waitUntil(Promise.all([runDiscovery(env), runScan(env)]));
+    ctx.waitUntil(runScan(env));
   },
 } satisfies ExportedHandler<Bindings>;

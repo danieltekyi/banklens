@@ -1,4 +1,3 @@
-
 export async function ensureBankLensSchema(db: D1Database) {
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS financial_records (
@@ -18,17 +17,15 @@ export async function ensureBankLensSchema(db: D1Database) {
       period_label TEXT,
       statement_date TEXT,
       content_hash TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'published',
       review_note TEXT,
       reviewed_by TEXT,
       reviewed_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`),
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_bank_metric_period
-      ON financial_records(bank_id, metric_key, reporting_period_end, status)`),
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_review
-      ON financial_records(status, created_at)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_bank_metric_period ON financial_records(bank_id,metric_key,reporting_period_end,status)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_review ON financial_records(status,created_at)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS financial_extractions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       bank_id INTEGER NOT NULL,
@@ -36,27 +33,72 @@ export async function ensureBankLensSchema(db: D1Database) {
       source_url TEXT NOT NULL,
       content_hash TEXT NOT NULL,
       period_label TEXT,
-      status TEXT NOT NULL DEFAULT 'extracted',
+      status TEXT NOT NULL DEFAULT 'published',
       records_found INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       created_at TEXT NOT NULL
     )`),
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_extractions_hash
-      ON financial_extractions(source_id, content_hash)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_extractions_hash ON financial_extractions(source_id,content_hash)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS financial_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bank_id INTEGER NOT NULL,
+      source_id INTEGER NOT NULL,
+      report_url TEXT NOT NULL,
+      report_title TEXT,
+      report_type TEXT,
+      content_hash TEXT,
+      content_type TEXT,
+      r2_key TEXT,
+      reporting_period_start TEXT,
+      reporting_period_end TEXT,
+      period_label TEXT,
+      status TEXT NOT NULL DEFAULT 'published',
+      error TEXT,
+      discovered_at TEXT NOT NULL,
+      downloaded_at TEXT,
+      processed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(source_id,report_url,content_hash)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_documents_source_url ON financial_documents(source_id,report_url)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_documents_bank_period ON financial_documents(bank_id,reporting_period_end,status)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS bank_analysis (
+      bank_id INTEGER PRIMARY KEY,
+      strengths_json TEXT NOT NULL DEFAULT '[]',
+      weaknesses_json TEXT NOT NULL DEFAULT '[]',
+      generated_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_analysis_generated ON bank_analysis(generated_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS latest_metrics (
+      bank_id INTEGER PRIMARY KEY,
+      assets REAL,
+      deposits REAL,
+      profit REAL,
+      capital_adequacy REAL,
+      liquidity REAL,
+      npl REAL,
+      reporting_period TEXT,
+      reporting_period_end TEXT,
+      updated_at TEXT
+    )`),
   ]);
+
+  // Safe additive migrations for installations that already have these tables.
+  const latestColumns = await db.prepare(`PRAGMA table_info(latest_metrics)`).all<any>();
+  const latestNames = new Set((latestColumns.results || []).map((x: any) => x.name));
+  for (const [name, type] of [
+    ["assets_source_url", "TEXT"], ["assets_source_title", "TEXT"],
+    ["deposits_source_url", "TEXT"], ["deposits_source_title", "TEXT"],
+    ["profit_source_url", "TEXT"], ["profit_source_title", "TEXT"],
+    ["capital_adequacy_source_url", "TEXT"], ["capital_adequacy_source_title", "TEXT"],
+    ["liquidity_source_url", "TEXT"], ["liquidity_source_title", "TEXT"],
+    ["npl_source_url", "TEXT"], ["npl_source_title", "TEXT"],
+  ] as const) {
+    if (!latestNames.has(name)) await db.prepare(`ALTER TABLE latest_metrics ADD COLUMN ${name} ${type}`).run();
+  }
 }
 
 export async function ensureLatestMetrics(db: D1Database) {
-  await db.prepare(`CREATE TABLE IF NOT EXISTS latest_metrics (
-    bank_id INTEGER PRIMARY KEY,
-    assets REAL,
-    deposits REAL,
-    profit REAL,
-    capital_adequacy REAL,
-    liquidity REAL,
-    npl REAL,
-    reporting_period TEXT,
-    reporting_period_end TEXT,
-    updated_at TEXT
-  )`).run();
+  await ensureBankLensSchema(db);
 }

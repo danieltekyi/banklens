@@ -1,3 +1,4 @@
+import Review from "./Review";
 import { useEffect, useState } from "react";
 
 const ADMIN_RECOVERY_EMAIL = "sameultekyi@gmail.com";
@@ -100,13 +101,19 @@ function Console({ token, logout }: { token: string; logout: () => void }) {
   const [countries, setCountries] = useState<Country[]>([]);
   const [busy, setBusy] = useState<number>();
   const [runProgress, setRunProgress] = useState<Record<number,{percent:number,message?:string,checked?:number,total?:number,changed?:number,failed?:number}>>({});
+  const [showReview, setShowReview] = useState(false);
   const load = () => api("/api/admin/countries", token).then((x) => setCountries(x.data));
   useEffect(() => { load().catch(logout); }, []);
+
+  if (showReview) {
+    return <Review token={token} onBack={() => { setShowReview(false); load(); }} />;
+  }
 
   return <section className="shell page">
     <div className="section-head">
       <div><span className="kicker">Secure administration</span><h1>Smart discovery</h1><p className="lead">BankLens starts at each country's verified regulator, discovers licensed banks, then tracks official publications and contextual sources.</p></div>
       <div style={{display:'flex',gap:8}}>
+        <button className="button small" onClick={() => setShowReview(true)}>Review & publish</button>
         <button onClick={async()=>{await api('/api/auth/forgot','',{method:'POST',body:JSON.stringify({email:ADMIN_RECOVERY_EMAIL})});alert(`If email delivery is configured, reset instructions have been sent to ${ADMIN_RECOVERY_EMAIL}.`)}} className="text-button small">Send password reset</button>
         <button onClick={logout} className="button small">Sign out</button>
       </div>
@@ -121,7 +128,7 @@ function Console({ token, logout }: { token: string; logout: () => void }) {
       <div className="table-wrap"><table><thead><tr><th>Country</th><th>Regulator</th><th>Banks</th><th>Review</th><th>Status</th><th>Enabled</th><th></th></tr></thead><tbody>
         {countries.map((country) => <tr key={country.id}>
           <td><b>{country.name}</b><small>{country.iso2} · {country.currency}</small></td>
-          <td>{country.regulator_name}</td><td>{country.bank_count}</td><td>{country.review_count}</td><td>{country.discovery_status}</td>
+          <td>{country.regulator_name}</td><td>{country.bank_count}</td><td><button className="text-button" onClick={() => setShowReview(true)} disabled={!country.review_count}>{country.review_count}</button></td><td>{country.discovery_status}</td>
           <td><button className={`toggle ${country.enabled ? "on" : ""}`} onClick={async () => { await api(`/api/admin/countries/${country.id}`, token, { method: "PATCH", body: JSON.stringify({ enabled: !country.enabled }) }); load(); }}><span /></button></td>
           <td>
             <div style={{display:'flex',gap:8,alignItems:'center'}}>

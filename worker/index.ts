@@ -5,6 +5,7 @@ import { listBanks, findBank } from "./db";
 import { runScan, runScanForCountry } from "./scanner";
 import { discoverCountry, runDiscovery } from "./discovery";
 import { digest, hashPassword, requireAdmin, token, verifyPassword } from "./auth";
+import { ensureBankLensSchema, ensureLatestMetrics } from "./schema";
 
 type Bindings = {
   DB: D1Database;
@@ -16,12 +17,27 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+let schemaReady: Promise<void> | null = null;
+async function ensureRuntimeSchema(db: D1Database) {
+  if (!schemaReady) {
+    schemaReady = (async () => {
+      await ensureBankLensSchema(db);
+      await ensureLatestMetrics(db);
+    })();
+  }
+  await schemaReady;
+}
 // Global error handler to ensure we return JSON for unexpected errors
 app.onError((err, c) => {
   console.error(err);
   return c.json({ error: String(err) }, 500);
 });
 app.use("/api/*", cors({ origin: "*" }));
+
+app.use("/api/*", async (c, next) => {
+  await ensureRuntimeSchema(c.env.DB);
+  await next();
+});
 
 app.get("/api/health", (c) => c.json({ ok: true, time: new Date().toISOString() }));
 
@@ -161,139 +177,177 @@ app.post("/api/admin/countries/:id/run", async (c) => {
   return new Response(stream.readable, { headers: { "Content-Type": "text/event-stream" } });
 });
 
-// Review queue: discovered links are the current reviewable unit in v1.
-// Discovery creates rows in discovered_links with status='new'. Approval makes
-// bank-specific links active scan sources when the link hostname matches a
-// bank website; rejection simply removes the item from the pending queue.
 app.get("/api/admin/reviews", async (c) => {
   const status = c.req.query("status") || "pending";
-  const limitRaw = Number(c.req.query("limit") || 200);
-  const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 200, 1), 500);
-
-  let query = `
-    SELECT
-      d.*,
-      c.name AS country_name,
-      c.iso2 AS country_iso2
-    FROM discovered_links d
-    JOIN countries c ON c.id=d.country_id
-  `;
-  const binds: any[] = [];
-
-  if (status === "pending") {
-    query += " WHERE d.status='new'";
-  } else if (status !== "all") {
-    query += " WHERE d.status=?";
-    binds.push(status);
-  }
-
-  query += " ORDER BY d.discovered_at DESC LIMIT ?";
-  binds.push(limit);
-
-  const { results } = await c.env.DB.prepare(query).bind(...binds).all();
-  return c.json({ data: results });
+  const { results } = await c.env.DB.prepare(
+    `SELECT fr.*, b.name bank_name, c.name country_name
+     FROM financial_records fr
+     JOIN banks b ON b.id=fr.bank_id
+     JOIN countries c ON c.id=b.country_id
+     WHERE (?='all' OR fr.status=?)
+     ORDER BY COALESCE(fr.reporting_period_end, fr.created_at) DESC, fr.bank_id, fr.metric_key
+     LIMIT 1000`,
+  ).bind(status, status).all();
+  const { results: links } = await c.env.DB.prepare(
+    `SELECT d.*, c.name country_name
+     FROM discovered_links d
+     JOIN countries c ON c.id=d.country_id
+     WHERE (?='all' OR d.status=?)
+     ORDER BY d.discovered_at DESC LIMIT 500`,
+  ).bind(status === "pending" ? "new" : "all", status === "pending" ? "new" : "all").all();
+  const { results: banks } = await c.env.DB.prepare(
+    "SELECT id,name,country_id FROM banks WHERE active=1 ORDER BY name"
+  ).all();
+  return c.json({ data: results, sources: links, banks });
 });
 
-// Backward-compatible singular endpoint used by earlier admin builds.
 app.get("/api/admin/review", async (c) => {
-  const { results } = await c.env.DB
-    .prepare("SELECT d.*,c.name country_name,c.iso2 country_iso2 FROM discovered_links d JOIN countries c ON c.id=d.country_id ORDER BY d.discovered_at DESC LIMIT 200")
-    .all();
+  const { results } = await c.env.DB.prepare(
+    "SELECT d.*,c.name country_name FROM discovered_links d JOIN countries c ON c.id=d.country_id ORDER BY d.discovered_at DESC LIMIT 200",
+  ).all();
   return c.json({ data: results });
 });
 
-async function approveDiscoveredLink(env: Bindings, id: number) {
-  const item = await env.DB.prepare(
-    "SELECT d.*,c.name country_name,c.iso2 country_iso2 FROM discovered_links d JOIN countries c ON c.id=d.country_id WHERE d.id=?"
-  ).bind(id).first<any>();
-
-  if (!item) throw new Error("Review item not found");
-  if (item.status !== "new") throw new Error(`Review item is already ${item.status}`);
-
-  let sourceCreated = false;
-  let bankId: number | null = null;
-
-  // discovered_links currently has country_id rather than bank_id. Resolve
-  // bank ownership from the official bank website hostname when possible.
-  try {
-    const linkHost = new URL(item.url).hostname.replace(/^www\\./i, "").toLowerCase();
-    const { results: banks } = await env.DB
-      .prepare("SELECT id,website FROM banks WHERE country_id=? AND active=1 AND website IS NOT NULL")
-      .bind(item.country_id)
-      .all<any>();
-
-    const bank = banks.find((b) => {
-      try {
-        return new URL(b.website).hostname.replace(/^www\\./i, "").toLowerCase() === linkHost;
-      } catch {
-        return false;
-      }
-    });
-
-    if (bank?.id) {
-      bankId = Number(bank.id);
-      const sourceType = item.kind === "financial" || item.kind === "product" ? item.kind : "candidate";
-      const existingSource = await env.DB
-        .prepare("SELECT id FROM sources WHERE bank_id=? AND url=? LIMIT 1")
-        .bind(bankId, item.url)
-        .first<any>();
-
-      if (existingSource?.id) {
-        await env.DB.prepare(
-          "UPDATE sources SET source_type=?,active=1 WHERE id=?"
-        ).bind(sourceType, existingSource.id).run();
-      } else {
-        await env.DB.prepare(
-          "INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)"
-        ).bind(bankId, item.url, sourceType).run();
-      }
-      sourceCreated = true;
-    }
-  } catch {
-    // A malformed URL or non-bank/central-bank source can still be approved
-    // as a reviewed discovery; it simply cannot become a bank source.
-  }
-
-  await env.DB.prepare("UPDATE discovered_links SET status='approved' WHERE id=? AND status='new'").bind(id).run();
-
-  return {
-    ok: true,
-    status: "approved",
-    sourceCreated,
-    bankId,
-    message: sourceCreated
-      ? "Approved and added to the bank's active scan sources."
-      : "Approved as a discovered source. It was not attached to a bank source because no bank website match was found.",
-  };
-}
-
-async function rejectDiscoveredLink(env: Bindings, id: number) {
-  const item = await env.DB.prepare("SELECT id,status FROM discovered_links WHERE id=?").bind(id).first<any>();
-  if (!item) throw new Error("Review item not found");
-  if (item.status !== "new") throw new Error(`Review item is already ${item.status}`);
-
-  await env.DB.prepare("UPDATE discovered_links SET status='rejected' WHERE id=? AND status='new'").bind(id).run();
-  return { ok: true, status: "rejected" };
-}
-
-app.post("/api/admin/reviews/:id/approve", async (c) => {
+app.post("/api/admin/reviews/:id/:action", async (c) => {
   const id = Number(c.req.param("id"));
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid review item id" }, 400);
-  try {
-    return c.json(await approveDiscoveredLink(c.env, id));
-  } catch (error) {
-    return c.json({ error: String(error) }, 409);
+  const action = c.req.param("action");
+  if (!Number.isFinite(id) || !["approve", "reject"].includes(action)) return c.json({ error: "Invalid review action" }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const user = await requireAdmin(c.req.raw, c.env.DB);
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+
+  const record = await c.env.DB.prepare("SELECT * FROM financial_records WHERE id=?").bind(id).first<any>();
+  if (!record) return c.json({ error: "Financial review item not found" }, 404);
+
+  const now = new Date().toISOString();
+  if (action === "reject") {
+    await c.env.DB.prepare(
+      "UPDATE financial_records SET status='rejected',review_note=?,reviewed_by=?,reviewed_at=?,updated_at=? WHERE id=?",
+    ).bind(body.note || null, user.username || user.email || String(user.id), now, now, id).run();
+    return c.json({ ok: true, status: "rejected" });
   }
+
+  await c.env.DB.prepare(
+    "UPDATE financial_records SET status='approved',review_note=?,reviewed_by=?,reviewed_at=?,updated_at=? WHERE id=?",
+  ).bind(body.note || null, user.username || user.email || String(user.id), now, now, id).run();
+
+  // Rebuild the public latest snapshot for this bank from approved records for
+  // the newest reporting period. Historical records remain untouched.
+  const latest = await c.env.DB.prepare(
+    `SELECT metric_key,value,unit,reporting_period_end,period_label
+     FROM financial_records
+     WHERE bank_id=? AND status='approved'
+     ORDER BY COALESCE(reporting_period_end,'0000-00-00') DESC, id DESC`,
+  ).bind(record.bank_id).all<any>();
+
+  const snapshot: any = { bank_id: record.bank_id, assets:null, deposits:null, profit:null, capital_adequacy:null, liquidity:null, npl:null, reporting_period:null, reporting_period_end:null, updated_at:now };
+  for (const row of latest.results || []) {
+    if (snapshot[row.metric_key] == null) {
+      snapshot[row.metric_key] = row.value;
+      snapshot.reporting_period = row.period_label;
+      snapshot.reporting_period_end = row.reporting_period_end;
+    }
+  }
+
+  const cols = await c.env.DB.prepare("PRAGMA table_info(latest_metrics)").all<any>();
+  const available = new Set((cols.results || []).map((x: any) => x.name));
+  const names = ["bank_id","assets","deposits","profit","capital_adequacy","liquidity","npl","reporting_period","reporting_period_end","updated_at"]
+    .filter(name => available.has(name));
+  const values: any = {
+    bank_id:snapshot.bank_id, assets:snapshot.assets, deposits:snapshot.deposits, profit:snapshot.profit,
+    capital_adequacy:snapshot.capital_adequacy, liquidity:snapshot.liquidity, npl:snapshot.npl,
+    reporting_period:snapshot.reporting_period, reporting_period_end:snapshot.reporting_period_end, updated_at:now
+  };
+  await c.env.DB.prepare("DELETE FROM latest_metrics WHERE bank_id=?").bind(record.bank_id).run();
+  const marks = names.map(() => "?").join(",");
+  await c.env.DB.prepare(`INSERT INTO latest_metrics(${names.join(",")}) VALUES(${marks})`)
+    .bind(...names.map(n => values[n])).run();
+
+  return c.json({ ok: true, status: "approved", published: true, latest: snapshot });
 });
 
-app.post("/api/admin/reviews/:id/reject", async (c) => {
+app.post("/api/admin/source-reviews/:id/:action", async (c) => {
   const id = Number(c.req.param("id"));
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid review item id" }, 400);
-  try {
-    return c.json(await rejectDiscoveredLink(c.env, id));
-  } catch (error) {
-    return c.json({ error: String(error) }, 409);
+  const action = c.req.param("action");
+  if (!Number.isFinite(id) || !["approve", "reject"].includes(action)) return c.json({ error: "Invalid review action" }, 400);
+  const row = await c.env.DB.prepare("SELECT * FROM discovered_links WHERE id=?").bind(id).first<any>();
+  if (!row) return c.json({ error: "Discovered source not found" }, 404);
+  if (action === "reject") {
+    await c.env.DB.prepare("UPDATE discovered_links SET status='rejected' WHERE id=?").bind(id).run();
+    return c.json({ ok: true, status: "rejected" });
   }
+
+  await c.env.DB.prepare("UPDATE discovered_links SET status='approved' WHERE id=?").bind(id).run();
+
+  let sourceAdded = false;
+  let bankId: number | null = body.bankId ? Number(body.bankId) : null;
+  try {
+    const hostname = new URL(row.url).hostname.replace(/^www\./, "").toLowerCase();
+    let bank: any = null;
+    if (bankId) {
+      bank = await c.env.DB.prepare("SELECT id FROM banks WHERE id=? AND country_id=? AND active=1")
+        .bind(bankId, row.country_id).first<any>();
+      if (!bank) bankId = null;
+    }
+    if (!bank) {
+      const { results: banks } = await c.env.DB.prepare(
+        "SELECT id,website FROM banks WHERE country_id=? AND active=1 AND website IS NOT NULL",
+      ).bind(row.country_id).all<any>();
+      bank = banks.find((b: any) => {
+        try { return new URL(b.website).hostname.replace(/^www\./,"").toLowerCase() === hostname; }
+        catch { return false; }
+      });
+      if (bank) bankId = bank.id;
+    }
+    if (bank) {
+      const existing = await c.env.DB.prepare(
+        "SELECT id FROM sources WHERE bank_id=? AND url=? LIMIT 1",
+      ).bind(bank.id, row.url).first<any>();
+      if (existing) {
+        await c.env.DB.prepare("UPDATE sources SET active=1,source_type=? WHERE id=?")
+          .bind(row.kind || "financial", existing.id).run();
+      } else {
+        await c.env.DB.prepare(
+          "INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)",
+        ).bind(bank.id, row.url, row.kind || "financial").run();
+      }
+      sourceAdded = true;
+    }
+  } catch {}
+
+  return c.json({ ok: true, status: "approved", sourceAdded, bankId });
+});
+
+app.get("/api/banks/:slug/trends", async (c) => {
+  const slug = c.req.param("slug");
+  const from = c.req.query("from") || "1900-01-01";
+  const to = c.req.query("to") || "2999-12-31";
+  const bank = await c.env.DB.prepare("SELECT id,name,slug FROM banks WHERE slug=? AND active=1").bind(slug).first<any>();
+  if (!bank) return c.json({ error: "Bank not found" }, 404);
+  const { results } = await c.env.DB.prepare(
+    `SELECT metric_key,metric_label,value,unit,currency,reporting_period_start,reporting_period_end,period_label,source_url,source_title
+     FROM financial_records
+     WHERE bank_id=? AND status='approved'
+       AND COALESCE(reporting_period_end,'9999-12-31') BETWEEN ? AND ?
+     ORDER BY reporting_period_end ASC, metric_key ASC`,
+  ).bind(bank.id, from, to).all();
+  return c.json({ data: results, meta: { bankId: bank.id, bankName: bank.name, from, to } });
+});
+
+app.get("/api/compare/trends", async (c) => {
+  const slugs = (c.req.query("banks") || "").split(",").map(x => x.trim()).filter(Boolean).slice(0,10);
+  const from = c.req.query("from") || "1900-01-01";
+  const to = c.req.query("to") || "2999-12-31";
+  if (!slugs.length) return c.json({ data: [] });
+  const placeholders = slugs.map(() => "?").join(",");
+  const { results } = await c.env.DB.prepare(
+    `SELECT b.slug,b.name,fr.metric_key,fr.metric_label,fr.value,fr.unit,fr.reporting_period_end,fr.period_label
+     FROM financial_records fr JOIN banks b ON b.id=fr.bank_id
+     WHERE fr.status='approved' AND b.slug IN (${placeholders})
+       AND COALESCE(fr.reporting_period_end,'9999-12-31') BETWEEN ? AND ?
+     ORDER BY fr.reporting_period_end ASC,b.name,fr.metric_key`,
+  ).bind(...slugs, from, to).all();
+  return c.json({ data: results, meta: { from, to } });
 });
 
 app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));

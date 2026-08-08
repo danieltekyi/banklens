@@ -1,15 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
 
-type ReviewItem = {
-  id: number | string;
-  country_name?: string | null;
-  country_iso2?: string | null;
-  url?: string | null;
-  kind?: string | null;
-  title?: string | null;
-  status?: string | null;
-  discovered_at?: string | null;
-  [key: string]: unknown;
+type MetricReview = {
+  id: number;
+  bank_id: number;
+  bank_name: string;
+  country_name: string;
+  source_type?: string;
+  source_url: string;
+  source_title?: string;
+  metric_key: string;
+  metric_label: string;
+  raw_value?: string;
+  value: number;
+  unit: string;
+  currency?: string;
+  reporting_period_start?: string;
+  reporting_period_end?: string;
+  period_label?: string;
+  status: string;
+};
+
+type BankOption = { id:number; name:string; country_id:number };
+type SourceReview = {
+  id: number;
+  country_id: number;
+  country_name: string;
+  url: string;
+  kind: string;
+  title?: string;
+  status: string;
+  discovered_at?: string;
 };
 
 type Props = { token: string; onBack: () => void };
@@ -23,299 +43,200 @@ async function api(path: string, token: string, options: RequestInit = {}) {
       ...(options.headers || {}),
     },
   });
-
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json")
     ? await response.json().catch(() => null)
     : await response.text();
-
-  if (!response.ok) {
-    const message =
-      typeof body === "string" && body
-        ? body
-        : body?.error || body?.message || response.statusText || "Request failed";
-    throw new Error(message);
-  }
+  if (!response.ok) throw new Error(body?.error || body || response.statusText || "Request failed");
   return body;
 }
 
-function listFromResponse(body: any): ReviewItem[] {
-  if (Array.isArray(body)) return body;
-  if (Array.isArray(body?.data)) return body.data;
-  return [];
-}
-
-function text(item: ReviewItem, ...keys: string[]) {
-  for (const key of keys) {
-    const value = item[key];
-    if (value !== null && value !== undefined && String(value).trim() !== "") {
-      return String(value);
-    }
-  }
-  return "—";
-}
-
-function formatDate(value: unknown) {
+function formatDate(value?: string) {
   if (!value) return "—";
-  const date = new Date(String(value));
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString();
 }
 
 export default function Review({ token, onBack }: Props) {
-  const [items, setItems] = useState<ReviewItem[]>([]);
+  const [metrics, setMetrics] = useState<MetricReview[]>([]);
+  const [sources, setSources] = useState<SourceReview[]>([]);
+  const [banks, setBanks] = useState<BankOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | number>();
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<"pending" | "all">("pending");
-  const [selected, setSelected] = useState<ReviewItem | null>(null);
+  const [busy, setBusy] = useState<string>("");
+  const [selected, setSelected] = useState<MetricReview | null>(null);
+  const [note, setNote] = useState("");
+  const [tab, setTab] = useState<"financial" | "sources">("financial");
 
-  async function load(nextFilter = filter) {
+  async function load() {
     setLoading(true);
     setError("");
-
     try {
-      const query = nextFilter === "pending" ? "?status=pending" : "?status=all";
-      const body = await api(`/api/admin/reviews${query}`, token);
-      setItems(listFromResponse(body));
+      const body = await api("/api/admin/reviews?status=pending", token);
+      setMetrics(Array.isArray(body?.data) ? body.data : []);
+      setSources(Array.isArray(body?.sources) ? body.sources : []);
+      setBanks(Array.isArray(body?.banks) ? body.banks : []);
     } catch (e) {
-      setError(`The review queue could not be loaded. ${String(e)}`);
+      setError(String(e));
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    load("pending");
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  const pendingCount = useMemo(
-    () => items.filter((item) => text(item, "status").toLowerCase() === "new").length,
-    [items]
-  );
-
-  async function changeStatus(item: ReviewItem, action: "approve" | "reject") {
-    const verb = action === "approve" ? "approve this source" : "reject this source";
-    if (!window.confirm(`Are you sure you want to ${verb}?\n\n${text(item, "title")}`)) {
-      return;
-    }
-
-    setBusy(item.id);
-    setError("");
-
+  async function reviewMetric(id: number, action: "approve" | "reject") {
+    setBusy(`metric-${id}`);
     try {
-      const id = encodeURIComponent(String(item.id));
       await api(`/api/admin/reviews/${id}/${action}`, token, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ note }),
       });
       setSelected(null);
-      await load(filter);
+      setNote("");
+      await load();
     } catch (e) {
-      setError(`Could not ${action} item ${item.id}. ${String(e)}`);
+      setError(String(e));
     } finally {
-      setBusy(undefined);
+      setBusy("");
     }
   }
+
+  async function reviewSource(id: number, action: "approve" | "reject", bankId?: number) {
+    setBusy(`source-${id}`);
+    try {
+      await api(`/api/admin/source-reviews/${id}/${action}`, token, {
+        method: "POST",
+        body: JSON.stringify({ note, bankId }),
+      });
+      setNote("");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, MetricReview[]>();
+    for (const item of metrics) {
+      const key = `${item.bank_id}:${item.period_label || item.reporting_period_end || "unknown"}`;
+      map.set(key, [...(map.get(key) || []), item]);
+    }
+    return [...map.values()];
+  }, [metrics]);
 
   return (
     <section className="shell page">
       <div className="section-head">
         <div>
           <span className="kicker">Secure administration</span>
-          <h1>Review queue</h1>
+          <h1>Review & publication</h1>
           <p className="lead">
-            Inspect discovered official sources before they are accepted into the BankLens collection pipeline.
+            Nothing enters the public comparison until the source and extracted financial values have been checked.
           </p>
         </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{display:"flex",gap:8}}>
           <button className="text-button" onClick={onBack}>← Admin console</button>
-          <button className="button small" onClick={() => load(filter)} disabled={loading}>
-            {loading ? "Refreshing…" : "Refresh"}
-          </button>
+          <button className="button small" onClick={load} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
         </div>
       </div>
-
-      <aside className="notice">
-        <b>What approval does in the current worker</b>
-        <p>
-          The current backend reviews <b>discovered source links</b>, not extracted financial metric values.
-          Approving a bank-specific link adds it to that bank's active scan sources. It does not by itself
-          change the public assets, deposits, profit, capital, liquidity, NPL or product figures; those
-          require an extraction/publication pipeline that is not present in the supplied worker code.
-        </p>
-      </aside>
 
       <div className="admin-stats">
-        <div><b>{filter === "pending" ? items.length : pendingCount}</b><span>{filter === "pending" ? "Pending review" : "Pending in loaded items"}</span></div>
-        <div><b>{items.length}</b><span>Loaded items</span></div>
+        <div><b>{metrics.length}</b><span>Financial values pending</span></div>
+        <div><b>{sources.length}</b><span>Sources pending</span></div>
+        <div><b>{grouped.length}</b><span>Statement periods</span></div>
       </div>
 
-      {error && (
-        <aside className="notice">
-          <b>Review queue error</b>
-          <p>{error}</p>
-        </aside>
+      {error && <aside className="notice"><b>Review error</b><p>{error}</p></aside>}
+
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        <button className={tab==="financial" ? "button small" : "text-button"} onClick={()=>setTab("financial")}>
+          Financial values ({metrics.length})
+        </button>
+        <button className={tab==="sources" ? "button small" : "text-button"} onClick={()=>setTab("sources")}>
+          Discovered sources ({sources.length})
+        </button>
+      </div>
+
+      {loading ? <div className="loading">Loading review queue…</div> : tab === "financial" ? (
+        <div className="panel">
+          <div className="section-head">
+            <div>
+              <h2>Financial statements</h2>
+              <p>Review the proposed values, period and source before publication.</p>
+            </div>
+          </div>
+
+          {metrics.length === 0 ? <div className="notice"><b>No financial values are waiting.</b><p>Approve a financial source, then run the country collection again to extract values.</p></div> :
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Bank</th><th>Metric</th><th>Value</th><th>Period</th><th>Source</th><th /></tr></thead>
+                <tbody>
+                  {metrics.map(item => (
+                    <tr key={item.id}>
+                      <td><b>{item.bank_name}</b><small>{item.country_name}</small></td>
+                      <td>{item.metric_label}</td>
+                      <td><b>{item.value}</b> <small>{item.unit}</small></td>
+                      <td>{item.period_label || item.reporting_period_end || "—"}</td>
+                      <td><a href={item.source_url} target="_blank" rel="noreferrer">Open source ↗</a></td>
+                      <td><button className="text-button" onClick={()=>{setSelected(item);setNote("");}}>Inspect</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          }
+        </div>
+      ) : (
+        <div className="panel">
+          <div className="section-head"><div><h2>Discovered sources</h2><p>Approve only official financial/product sources that should be tracked.</p></div></div>
+          {sources.length === 0 ? <div className="notice"><b>No sources are waiting.</b></div> :
+            <div className="table-wrap"><table><thead><tr><th>Country</th><th>Type</th><th>Title</th><th>URL</th><th>Discovered</th><th /></tr></thead>
+              <tbody>{sources.map(s=><tr key={s.id}>
+                <td>{s.country_name}</td><td>{s.kind}</td><td>{s.title || "—"}</td>
+                <td><a href={s.url} target="_blank" rel="noreferrer">Open ↗</a></td>
+                <td>{formatDate(s.discovered_at)}</td>
+                <td><div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <select id={`bank-${s.id}`} defaultValue="" disabled={busy===`source-${s.id}`}>
+                    <option value="">Select bank</option>
+                    {banks.filter(b=>b.country_id===s.country_id).map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                  <button className="text-button" disabled={busy===`source-${s.id}`} onClick={()=>reviewSource(s.id,"reject")}>Reject</button>
+                  <button className="button small" disabled={busy===`source-${s.id}`} onClick={()=>{
+                    const el=document.getElementById(`bank-${s.id}`) as HTMLSelectElement | null;
+                    const bankId=el?.value ? Number(el.value) : undefined;
+                    if (!bankId && s.kind==="financial") { setError("Select the bank that owns this financial source before approving."); return; }
+                    reviewSource(s.id,"approve",bankId);
+                  }}>{busy===`source-${s.id}`?"Saving…":"Approve source"}</button>
+                </div></td>
+              </tr>)}</tbody>
+            </table></div>
+          }
+        </div>
       )}
 
-      <div className="panel">
-        <div className="section-head">
-          <div>
-            <h2>Discovered sources</h2>
-            <p>Review the URL and discovery classification before accepting it.</p>
-          </div>
-
-          <select
-            value={filter}
-            onChange={(e) => {
-              const value = e.target.value as "pending" | "all";
-              setFilter(value);
-              load(value);
-            }}
-          >
-            <option value="pending">Pending only</option>
-            <option value="all">All</option>
-          </select>
-        </div>
-
-        {loading ? (
-          <div className="loading">Loading review queue…</div>
-        ) : items.length === 0 ? (
-          <div className="notice">
-            <b>No items waiting for review.</b>
-            <p>Run discovery or a country collection from the admin console to create new discovery candidates.</p>
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Country</th>
-                  <th>Type</th>
-                  <th>Title</th>
-                  <th>Source</th>
-                  <th>Discovered</th>
-                  <th>Status</th>
-                  <th />
-                </tr>
-              </thead>
-
-              <tbody>
-                {items.map((item) => (
-                  <tr key={String(item.id)}>
-                    <td>
-                      <b>{text(item, "country_name")}</b>
-                      <small>{text(item, "country_iso2")}</small>
-                    </td>
-                    <td>{text(item, "kind")}</td>
-                    <td>{text(item, "title")}</td>
-                    <td>
-                      {item.url ? (
-                        <a href={String(item.url)} target="_blank" rel="noreferrer">
-                          Open source ↗
-                        </a>
-                      ) : "—"}
-                    </td>
-                    <td>{formatDate(item.discovered_at)}</td>
-                    <td>{text(item, "status")}</td>
-                    <td>
-                      <button
-                        className="text-button"
-                        onClick={() => setSelected(item)}
-                      >
-                        Inspect
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
       {selected && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: 20,
-            zIndex: 1000,
-          }}
-        >
-          <div
-            className="panel"
-            style={{
-              width: "min(900px, 100%)",
-              maxHeight: "90vh",
-              overflow: "auto",
-            }}
-          >
+        <div role="dialog" aria-modal="true" style={{position:"fixed",inset:0,background:"rgba(0,0,0,.35)",display:"flex",justifyContent:"center",alignItems:"center",padding:20,zIndex:1000}}>
+          <div className="panel" style={{width:"min(900px,100%)",maxHeight:"90vh",overflow:"auto"}}>
             <div className="section-head">
-              <div>
-                <span className="kicker">Review item #{String(selected.id)}</span>
-                <h2>{text(selected, "title")}</h2>
-                <p>
-                  {text(selected, "country_name")} · {text(selected, "kind")}
-                </p>
-              </div>
-              <button className="text-button" onClick={() => setSelected(null)}>
-                Close
-              </button>
+              <div><span className="kicker">Financial value #{selected.id}</span><h2>{selected.bank_name}</h2><p>{selected.metric_label} · {selected.period_label || selected.reporting_period_end}</p></div>
+              <button className="text-button" onClick={()=>setSelected(null)}>Close</button>
             </div>
-
             <div className="metric-cards">
-              <div className="metric-card">
-                <span>Country</span>
-                <b>{text(selected, "country_name")}</b>
-              </div>
-              <div className="metric-card">
-                <span>Classification</span>
-                <b>{text(selected, "kind")}</b>
-              </div>
-              <div className="metric-card">
-                <span>Status</span>
-                <b>{text(selected, "status")}</b>
-              </div>
-              <div className="metric-card">
-                <span>Discovered</span>
-                <b>{formatDate(selected.discovered_at)}</b>
-              </div>
+              <div className="metric-card"><span>Metric</span><b>{selected.metric_label}</b></div>
+              <div className="metric-card"><span>Proposed value</span><b>{selected.value} {selected.unit}</b></div>
+              <div className="metric-card"><span>Reporting period</span><b>{selected.period_label || selected.reporting_period_end || "—"}</b></div>
+              <div className="metric-card"><span>Raw source value</span><b>{selected.raw_value || "—"}</b></div>
             </div>
-
-            <h3>Source URL</h3>
-            <p style={{ wordBreak: "break-all" }}>
-              {selected.url ? (
-                <a href={String(selected.url)} target="_blank" rel="noreferrer">
-                  {String(selected.url)}
-                </a>
-              ) : "No URL supplied."}
-            </p>
-
-            {String(selected.status).toLowerCase() === "new" && (
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
-                <button
-                  className="text-button"
-                  disabled={busy === selected.id}
-                  onClick={() => changeStatus(selected, "reject")}
-                >
-                  {busy === selected.id ? "Saving…" : "Reject"}
-                </button>
-                <button
-                  className="button"
-                  disabled={busy === selected.id}
-                  onClick={() => changeStatus(selected, "approve")}
-                >
-                  {busy === selected.id ? "Approving…" : "Approve source"}
-                </button>
-              </div>
-            )}
+            <h3>Source evidence</h3>
+            <p><a href={selected.source_url} target="_blank" rel="noreferrer">{selected.source_title || selected.source_url} ↗</a></p>
+            <label>Review note<textarea value={note} onChange={e=>setNote(e.target.value)} rows={4} style={{width:"100%",boxSizing:"border-box"}} placeholder="Optional audit note"/></label>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10,marginTop:16}}>
+              <button className="text-button" disabled={busy===`metric-${selected.id}`} onClick={()=>reviewMetric(selected.id,"reject")}>Reject</button>
+              <button className="button" disabled={busy===`metric-${selected.id}`} onClick={()=>reviewMetric(selected.id,"approve")}>{busy===`metric-${selected.id}`?"Publishing…":"Approve & publish"}</button>
+            </div>
           </div>
         </div>
       )}

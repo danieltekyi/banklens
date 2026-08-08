@@ -161,9 +161,139 @@ app.post("/api/admin/countries/:id/run", async (c) => {
   return new Response(stream.readable, { headers: { "Content-Type": "text/event-stream" } });
 });
 
-app.get("/api/admin/review", async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT d.*,c.name country_name FROM discovered_links d JOIN countries c ON c.id=d.country_id ORDER BY d.discovered_at DESC LIMIT 200").all();
+// Review queue: discovered links are the current reviewable unit in v1.
+// Discovery creates rows in discovered_links with status='new'. Approval makes
+// bank-specific links active scan sources when the link hostname matches a
+// bank website; rejection simply removes the item from the pending queue.
+app.get("/api/admin/reviews", async (c) => {
+  const status = c.req.query("status") || "pending";
+  const limitRaw = Number(c.req.query("limit") || 200);
+  const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 200, 1), 500);
+
+  let query = `
+    SELECT
+      d.*,
+      c.name AS country_name,
+      c.iso2 AS country_iso2
+    FROM discovered_links d
+    JOIN countries c ON c.id=d.country_id
+  `;
+  const binds: any[] = [];
+
+  if (status === "pending") {
+    query += " WHERE d.status='new'";
+  } else if (status !== "all") {
+    query += " WHERE d.status=?";
+    binds.push(status);
+  }
+
+  query += " ORDER BY d.discovered_at DESC LIMIT ?";
+  binds.push(limit);
+
+  const { results } = await c.env.DB.prepare(query).bind(...binds).all();
   return c.json({ data: results });
+});
+
+// Backward-compatible singular endpoint used by earlier admin builds.
+app.get("/api/admin/review", async (c) => {
+  const { results } = await c.env.DB
+    .prepare("SELECT d.*,c.name country_name,c.iso2 country_iso2 FROM discovered_links d JOIN countries c ON c.id=d.country_id ORDER BY d.discovered_at DESC LIMIT 200")
+    .all();
+  return c.json({ data: results });
+});
+
+async function approveDiscoveredLink(env: Bindings, id: number) {
+  const item = await env.DB.prepare(
+    "SELECT d.*,c.name country_name,c.iso2 country_iso2 FROM discovered_links d JOIN countries c ON c.id=d.country_id WHERE d.id=?"
+  ).bind(id).first<any>();
+
+  if (!item) throw new Error("Review item not found");
+  if (item.status !== "new") throw new Error(`Review item is already ${item.status}`);
+
+  let sourceCreated = false;
+  let bankId: number | null = null;
+
+  // discovered_links currently has country_id rather than bank_id. Resolve
+  // bank ownership from the official bank website hostname when possible.
+  try {
+    const linkHost = new URL(item.url).hostname.replace(/^www\\./i, "").toLowerCase();
+    const { results: banks } = await env.DB
+      .prepare("SELECT id,website FROM banks WHERE country_id=? AND active=1 AND website IS NOT NULL")
+      .bind(item.country_id)
+      .all<any>();
+
+    const bank = banks.find((b) => {
+      try {
+        return new URL(b.website).hostname.replace(/^www\\./i, "").toLowerCase() === linkHost;
+      } catch {
+        return false;
+      }
+    });
+
+    if (bank?.id) {
+      bankId = Number(bank.id);
+      const sourceType = item.kind === "financial" || item.kind === "product" ? item.kind : "candidate";
+      const existingSource = await env.DB
+        .prepare("SELECT id FROM sources WHERE bank_id=? AND url=? LIMIT 1")
+        .bind(bankId, item.url)
+        .first<any>();
+
+      if (existingSource?.id) {
+        await env.DB.prepare(
+          "UPDATE sources SET source_type=?,active=1 WHERE id=?"
+        ).bind(sourceType, existingSource.id).run();
+      } else {
+        await env.DB.prepare(
+          "INSERT INTO sources(bank_id,url,source_type,active) VALUES(?,?,?,1)"
+        ).bind(bankId, item.url, sourceType).run();
+      }
+      sourceCreated = true;
+    }
+  } catch {
+    // A malformed URL or non-bank/central-bank source can still be approved
+    // as a reviewed discovery; it simply cannot become a bank source.
+  }
+
+  await env.DB.prepare("UPDATE discovered_links SET status='approved' WHERE id=? AND status='new'").bind(id).run();
+
+  return {
+    ok: true,
+    status: "approved",
+    sourceCreated,
+    bankId,
+    message: sourceCreated
+      ? "Approved and added to the bank's active scan sources."
+      : "Approved as a discovered source. It was not attached to a bank source because no bank website match was found.",
+  };
+}
+
+async function rejectDiscoveredLink(env: Bindings, id: number) {
+  const item = await env.DB.prepare("SELECT id,status FROM discovered_links WHERE id=?").bind(id).first<any>();
+  if (!item) throw new Error("Review item not found");
+  if (item.status !== "new") throw new Error(`Review item is already ${item.status}`);
+
+  await env.DB.prepare("UPDATE discovered_links SET status='rejected' WHERE id=? AND status='new'").bind(id).run();
+  return { ok: true, status: "rejected" };
+}
+
+app.post("/api/admin/reviews/:id/approve", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid review item id" }, 400);
+  try {
+    return c.json(await approveDiscoveredLink(c.env, id));
+  } catch (error) {
+    return c.json({ error: String(error) }, 409);
+  }
+});
+
+app.post("/api/admin/reviews/:id/reject", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid review item id" }, 400);
+  try {
+    return c.json(await rejectDiscoveredLink(c.env, id));
+  } catch (error) {
+    return c.json({ error: String(error) }, 409);
+  }
 });
 
 app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));

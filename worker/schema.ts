@@ -70,7 +70,7 @@ export async function ensureBankLensSchema(db: D1Database) {
       generated_at TEXT NOT NULL
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_analysis_generated ON bank_analysis(generated_at)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS latest_metrics (
+    db.prepare(`CREATE TABLE IF NOT EXISTS banklens_latest_metrics (
       bank_id INTEGER PRIMARY KEY,
       assets REAL,
       deposits REAL,
@@ -80,22 +80,38 @@ export async function ensureBankLensSchema(db: D1Database) {
       npl REAL,
       reporting_period TEXT,
       reporting_period_end TEXT,
-      updated_at TEXT
+      updated_at TEXT,
+      assets_source_url TEXT,
+      assets_source_title TEXT,
+      deposits_source_url TEXT,
+      deposits_source_title TEXT,
+      profit_source_url TEXT,
+      profit_source_title TEXT,
+      capital_adequacy_source_url TEXT,
+      capital_adequacy_source_title TEXT,
+      liquidity_source_url TEXT,
+      liquidity_source_title TEXT,
+      npl_source_url TEXT,
+      npl_source_title TEXT
     )`),
   ]);
 
-  // Safe additive migrations for installations that already have these tables.
-  const latestColumns = await db.prepare(`PRAGMA table_info(latest_metrics)`).all<any>();
-  const latestNames = new Set((latestColumns.results || []).map((x: any) => x.name));
-  for (const [name, type] of [
-    ["assets_source_url", "TEXT"], ["assets_source_title", "TEXT"],
-    ["deposits_source_url", "TEXT"], ["deposits_source_title", "TEXT"],
-    ["profit_source_url", "TEXT"], ["profit_source_title", "TEXT"],
-    ["capital_adequacy_source_url", "TEXT"], ["capital_adequacy_source_title", "TEXT"],
-    ["liquidity_source_url", "TEXT"], ["liquidity_source_title", "TEXT"],
-    ["npl_source_url", "TEXT"], ["npl_source_title", "TEXT"],
-  ] as const) {
-    if (!latestNames.has(name)) await db.prepare(`ALTER TABLE latest_metrics ADD COLUMN ${name} ${type}`).run();
+  // `latest_metrics` is an existing production view in some BankLens D1 databases.
+  // Never ALTER or CREATE TABLE against that object. The writable BankLens snapshot
+  // lives in banklens_latest_metrics instead.
+  //
+  // Best-effort bootstrap: preserve the existing six public metrics if the legacy
+  // view is readable. This does not modify or drop the view.
+  try {
+    await db.prepare(`
+      INSERT OR IGNORE INTO banklens_latest_metrics
+      (bank_id,assets,deposits,profit,capital_adequacy,liquidity,npl,reporting_period,reporting_period_end,updated_at)
+      SELECT bank_id,assets,deposits,profit,capital_adequacy,liquidity,npl,reporting_period,reporting_period_end,COALESCE(updated_at,?)
+      FROM latest_metrics
+    `).bind(new Date().toISOString()).run();
+  } catch {
+    // Legacy latest_metrics may not exist or may expose a different shape.
+    // New financial scans will populate banklens_latest_metrics.
   }
 }
 

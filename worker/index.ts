@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { demoBanks } from "./demo";
 import { listBanks, findBank } from "./db";
-import { runScan, runScanForCountry } from "./scanner";
+import { processReport, reprocessStoredReports, runScan, runScanForCountry } from "./scanner";
 import { digest, hashPassword, requireAdmin, token, verifyPassword } from "./auth";
 import { ensureBankLensSchema, ensureLatestMetrics } from "./schema";
 
@@ -187,7 +187,8 @@ app.get("/api/compare/rankings", async (c) => {
 
 app.get("/api/admin/countries", async (c) => {
   const { results } = await c.env.DB.prepare(`SELECT c.*,
-    (SELECT COUNT(*) FROM banks b WHERE b.country_id=c.id AND b.active=1) bank_count,
+    (SELECT COUNT(DISTINCT b.id) FROM banks b JOIN sources s ON s.bank_id=b.id WHERE b.country_id=c.id AND b.active=1 AND s.active=1 AND s.source_type='financial_portal') bank_count,
+    (SELECT COUNT(*) FROM banks b WHERE b.country_id=c.id AND b.active=1) bank_total,
     (SELECT COUNT(*) FROM sources s JOIN banks b ON b.id=s.bank_id WHERE b.country_id=c.id AND b.active=1 AND s.active=1 AND s.source_type='financial_portal') source_count,
     (SELECT COUNT(*) FROM financial_documents d JOIN banks b ON b.id=d.bank_id WHERE b.country_id=c.id AND d.status='published') report_count,
     (SELECT MAX(sr.checked_at) FROM source_checks sr JOIN sources s ON s.id=sr.source_id JOIN banks b ON b.id=s.bank_id WHERE b.country_id=c.id) last_scan_at
@@ -266,10 +267,90 @@ app.post("/api/admin/ghana-starter", async (c) => {
   return c.json({ok:true,countryId:country.id,banksAdded,sourcesAdded});
 });
 
+
+
+async function repairCountryData(db: D1Database, countryId: number) {
+  const { results: sources } = await db.prepare(
+    `SELECT s.id,s.bank_id FROM sources s JOIN banks b ON b.id=s.bank_id
+     WHERE b.country_id=? AND b.active=1 AND s.active=1 AND s.source_type='financial_portal'`
+  ).bind(countryId).all<any>();
+
+  let documentsReassigned=0, recordsReassigned=0, extractionsReassigned=0;
+  for(const source of sources || []) {
+    const doc=await db.prepare("SELECT COUNT(*) n FROM financial_documents WHERE source_id=? AND bank_id<>?").bind(source.id,source.bank_id).first<any>();
+    const rec=await db.prepare("SELECT COUNT(*) n FROM financial_records WHERE source_id=? AND bank_id<>?").bind(source.id,source.bank_id).first<any>();
+    const ext=await db.prepare("SELECT COUNT(*) n FROM financial_extractions WHERE source_id=? AND bank_id<>?").bind(source.id,source.bank_id).first<any>();
+    documentsReassigned+=Number(doc?.n||0); recordsReassigned+=Number(rec?.n||0); extractionsReassigned+=Number(ext?.n||0);
+    const now=new Date().toISOString();
+    await db.batch([
+      db.prepare("UPDATE financial_documents SET bank_id=?,updated_at=? WHERE source_id=?").bind(source.bank_id,now,source.id),
+      db.prepare("UPDATE financial_records SET bank_id=?,updated_at=? WHERE source_id=?").bind(source.bank_id,now,source.id),
+      db.prepare("UPDATE financial_extractions SET bank_id=? WHERE source_id=?").bind(source.bank_id,source.id),
+    ]);
+  }
+  return {sourcesChecked:sources?.length||0,documentsReassigned,recordsReassigned,extractionsReassigned};
+}
+
+app.post("/api/admin/countries/:id/repair", async (c) => {
+  const countryId = Number(c.req.param("id"));
+  const { results: sources } = await c.env.DB.prepare(
+    `SELECT s.id,s.bank_id,s.url,b.name bank_name
+     FROM sources s JOIN banks b ON b.id=s.bank_id
+     WHERE b.country_id=? AND b.active=1 AND s.active=1 AND s.source_type='financial_portal'`
+  ).bind(countryId).all<any>();
+
+  let documentsReassigned = 0;
+  let recordsReassigned = 0;
+  let extractionsReassigned = 0;
+
+  for (const source of sources || []) {
+    const doc = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM financial_documents WHERE source_id=? AND bank_id<>?`
+    ).bind(source.id,source.bank_id).first<any>();
+    const rec = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM financial_records WHERE source_id=? AND bank_id<>?`
+    ).bind(source.id,source.bank_id).first<any>();
+    const ext = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM financial_extractions WHERE source_id=? AND bank_id<>?`
+    ).bind(source.id,source.bank_id).first<any>();
+
+    documentsReassigned += Number(doc?.n || 0);
+    recordsReassigned += Number(rec?.n || 0);
+    extractionsReassigned += Number(ext?.n || 0);
+
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE financial_documents SET bank_id=?,updated_at=? WHERE source_id=?")
+        .bind(source.bank_id,new Date().toISOString(),source.id),
+      c.env.DB.prepare("UPDATE financial_records SET bank_id=?,updated_at=? WHERE source_id=?")
+        .bind(source.bank_id,new Date().toISOString(),source.id),
+      c.env.DB.prepare("UPDATE financial_extractions SET bank_id=? WHERE source_id=?")
+        .bind(source.bank_id,source.id),
+    ]);
+  }
+
+  return c.json({
+    ok:true,
+    countryId,
+    sourcesChecked:sources?.length || 0,
+    documentsReassigned,
+    recordsReassigned,
+    extractionsReassigned,
+  });
+});
+
+
+app.post("/api/admin/countries/:id/reprocess", async (c) => {
+  const countryId=Number(c.req.param("id")); const encoder=new TextEncoder(); const stream=new TransformStream(); const writer=stream.writable.getWriter();
+  (async()=>{try{await writer.write(encoder.encode(JSON.stringify({status:"starting",countryId})+"\n")); const result=await reprocessStoredReports(c.env,countryId,async(info)=>{await writer.write(encoder.encode(JSON.stringify(info)+"\n"));}); await writer.write(encoder.encode(JSON.stringify({status:"done",result})+"\n"));}catch(error){await writer.write(encoder.encode(JSON.stringify({status:"error",message:String(error)})+"\n"));}finally{writer.close();}})();
+  return new Response(stream.readable,{headers:{"Content-Type":"text/event-stream","Cache-Control":"no-cache","Connection":"keep-alive"}});
+});
+
 app.post("/api/admin/countries/:id/analyze", async (c) => {
   const id=Number(c.req.param("id")); const encoder=new TextEncoder(); const stream=new TransformStream(); const writer=stream.writable.getWriter();
   (async()=>{try{
     await writer.write(encoder.encode(JSON.stringify({status:"starting",countryId:id})+"\n"));
+    const repair = await repairCountryData(c.env.DB,id);
+    await writer.write(encoder.encode(JSON.stringify({status:"repaired",...repair})+"\n"));
     const result=await runScanForCountry(c.env,id,async(info)=>{await writer.write(encoder.encode(JSON.stringify(info)+"\n"));});
     await writer.write(encoder.encode(JSON.stringify({status:"done",result})+"\n"));
   }catch(error){await writer.write(encoder.encode(JSON.stringify({status:"error",message:String(error)})+"\n"));}finally{writer.close();}})();
@@ -279,11 +360,56 @@ app.post("/api/admin/countries/:id/analyze", async (c) => {
 // Legacy discovery endpoint is intentionally disabled. BankLens now scans only administrator-configured financial portals.
 app.post("/api/admin/countries/:id/discover", async (c) => c.json({error:"Automatic discovery is disabled. Add each bank and its official financial-report portal in Admin."},410));
 
+
+app.get("/api/admin/countries/:id/source-map", async (c) => {
+  const countryId=Number(c.req.param("id"));
+  const {results}=await c.env.DB.prepare(
+    `SELECT s.id,s.url,s.source_type,s.active,s.bank_id,b.name bank_name,
+      (SELECT COUNT(*) FROM financial_documents d WHERE d.source_id=s.id) report_count,
+      (SELECT COUNT(*) FROM financial_records fr WHERE fr.source_id=s.id AND fr.status='published') value_count
+     FROM sources s JOIN banks b ON b.id=s.bank_id
+     WHERE b.country_id=? ORDER BY b.name,s.url`
+  ).bind(countryId).all<any>();
+  return c.json({data:results});
+});
+
+app.get("/api/admin/countries/:id/analysis-status", async (c) => {
+  const countryId=Number(c.req.param("id"));
+  const {results}=await c.env.DB.prepare(`SELECT b.id bank_id,b.name bank_name,(SELECT COUNT(*) FROM sources s WHERE s.bank_id=b.id AND s.active=1 AND s.source_type='financial_portal') portal_count,(SELECT COUNT(*) FROM financial_documents d WHERE d.bank_id=b.id AND d.status='published') report_count,(SELECT COUNT(*) FROM financial_records fr WHERE fr.bank_id=b.id AND fr.status='published') value_count,(SELECT COUNT(*) FROM financial_documents d WHERE d.bank_id=b.id AND d.status='published' AND NOT EXISTS (SELECT 1 FROM financial_records fr WHERE fr.source_id=d.source_id AND fr.source_url=d.report_url AND fr.content_hash=d.content_hash AND fr.status='published')) pending_reprocess FROM banks b WHERE b.country_id=? AND b.active=1 ORDER BY b.name`).bind(countryId).all<any>();
+  return c.json({data:results});
+});
+
 app.get("/api/admin/audit", async (c) => {
   const limit=Math.min(1000,Math.max(50,Number(c.req.query("limit")||500)));
-  const {results:reports}=await c.env.DB.prepare(`SELECT d.id,d.report_title,d.report_url,d.reporting_period_end,d.period_label,d.processed_at,d.status,b.name bank_name,c.name country_name FROM financial_documents d JOIN banks b ON b.id=d.bank_id JOIN countries c ON c.id=b.country_id ORDER BY d.processed_at DESC LIMIT ${limit}`).all();
+  const {results:reports}=await c.env.DB.prepare(`SELECT d.id,d.report_title,d.report_url,d.reporting_period_end,d.period_label,d.processed_at,d.status,
+    b.name bank_name,s.bank_id source_bank_id,sb.name source_bank_name,c.name country_name,
+    CASE WHEN d.bank_id=s.bank_id THEN 0 ELSE 1 END bank_mismatch
+    FROM financial_documents d
+    JOIN banks b ON b.id=d.bank_id
+    JOIN countries c ON c.id=b.country_id
+    JOIN sources s ON s.id=d.source_id
+    JOIN banks sb ON sb.id=s.bank_id
+    ORDER BY d.processed_at DESC LIMIT ${limit}`).all();
   const {results:metrics}=await c.env.DB.prepare(`SELECT fr.bank_id,b.name bank_name,c.name country_name,fr.metric_label,fr.value,fr.unit,fr.period_label,fr.reporting_period_end,fr.source_url,fr.source_title FROM financial_records fr JOIN banks b ON b.id=fr.bank_id JOIN countries c ON c.id=b.country_id WHERE fr.status='published' ORDER BY fr.reporting_period_end DESC,fr.id DESC LIMIT ${limit}`).all();
   return c.json({reports,metrics});
+});
+
+
+app.get("/api/admin/sources/:id/diagnostics", async (c) => {
+  const id = Number(c.req.param("id"));
+  const source = await c.env.DB.prepare(`SELECT s.id,s.bank_id,s.url,s.source_type,s.active,b.name bank_name,c.name country_name
+    FROM sources s JOIN banks b ON b.id=s.bank_id JOIN countries c ON c.id=b.country_id WHERE s.id=?`).bind(id).first<any>();
+  if (!source) return c.json({error:"Source not found"},404);
+  const {results:checks} = await c.env.DB.prepare(`SELECT status,content_hash,checked_at,error FROM source_checks WHERE source_id=? ORDER BY checked_at DESC LIMIT 10`).bind(id).all<any>();
+  const {results:reports} = await c.env.DB.prepare(`SELECT d.id,d.bank_id,d.report_title,d.report_url,d.report_type,d.reporting_period_start,d.reporting_period_end,d.period_label,d.status,d.error,d.downloaded_at,d.processed_at,
+    (SELECT COUNT(*) FROM financial_records fr WHERE fr.source_id=d.source_id AND fr.source_url=d.report_url AND fr.content_hash=d.content_hash AND fr.status='published') metric_count
+    FROM financial_documents d WHERE d.source_id=? ORDER BY d.created_at DESC LIMIT 100`).bind(id).all<any>();
+  const summary=await c.env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM financial_documents WHERE source_id=?) reports,
+      (SELECT COUNT(*) FROM financial_records WHERE source_id=? AND status='published') published_values,
+      (SELECT COUNT(*) FROM financial_extractions WHERE source_id=? AND status='no_metrics') no_metric_reports
+    `).bind(id,id,id).first<any>();
+  return c.json({source,checks,reports,summary});
 });
 
 app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));

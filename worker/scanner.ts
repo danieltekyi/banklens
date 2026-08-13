@@ -398,7 +398,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 
 async function fetchPortal(url:string, timeoutMs = PORTAL_FETCH_TIMEOUT_MS){
   const headers={
-    "User-Agent":"Mozilla/5.0 (compatible; BankLensBot/0.6; +https://banklens.odefokitchen.com/methodology)",
+    "User-Agent":"Mozilla/5.0 (compatible; BankLensBot/0.6; +https://banklens.tiwaak.com/methodology)",
     "Accept":"text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
     "Accept-Language":"en-US,en;q=0.8",
   };

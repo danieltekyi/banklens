@@ -6,15 +6,6 @@
 	"observability": {
 		"enabled": true
 	},
-	// Serve the app on the custom subdomain. odefokitchen.com must be an active
-	// zone in the same Cloudflare account; Wrangler then provisions the DNS
-	// record and certificate on deploy, so no manual dashboard step is needed.
-	"routes": [
-		{
-			"pattern": "banklens.odefokitchen.com",
-			"custom_domain": true
-		}
-	],
 	"assets": {
 		"directory": "dist",
 		"not_found_handling": "single-page-application"

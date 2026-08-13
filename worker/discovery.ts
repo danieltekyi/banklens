@@ -101,7 +101,7 @@ async function syncBankDirectory(env: Env, country: any, html: string) {
 export async function discoverCountry(env: Env, countryId: number) {
 	const country = await env.DB.prepare("SELECT * FROM countries WHERE id=? AND enabled=1").bind(countryId).first<any>();
 	if (!country) throw new Error("Country is not enabled");
-	const res = await fetch(country.bank_directory_url, { headers: { "User-Agent": "BankLensBot/0.2 (+https://banklens.odefokitchen.com/methodology)" } });
+	const res = await fetch(country.bank_directory_url, { headers: { "User-Agent": "BankLensBot/0.2 (+https://banklens.tiwaak.com/methodology)" } });
 	if (!res.ok) throw new Error(`Regulator returned ${res.status}`);
 	const html = await res.text();
 	const bankSync = await syncBankDirectory(env, country, html);

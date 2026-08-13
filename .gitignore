@@ -1,7 +1,9 @@
 node_modules
 dist
+banklens_data
 .wrangler
 .dev.vars
 .env
 .DS_Store
 *.log
+*.pdf

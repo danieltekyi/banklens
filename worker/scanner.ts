@@ -129,16 +129,27 @@ function decodePdfLiteral(value: string) {
     .replace(/\\\r?\n/g, "");
 }
 
-async function inflate(bytes: Uint8Array) {
-  const attempts = ["deflate-raw", "deflate"];
-  for (const format of attempts) {
-    try {
-      const ds = new DecompressionStream(format as CompressionFormat);
-      const stream = new Blob([bytes]).stream().pipeThrough(ds);
-      return new Uint8Array(await new Response(stream).arrayBuffer());
-    } catch {}
+async function inflate(bytes: Uint8Array, timeoutMs = 8_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const formats = ["deflate-raw", "deflate"];
+    for (const format of formats) {
+      if (controller.signal.aborted) throw new Error(`PDF stream decompression timed out after ${Math.round(timeoutMs / 1000)}s`);
+      try {
+        const ds = new DecompressionStream(format as CompressionFormat);
+        const stream = new Blob([bytes]).stream().pipeThrough(ds, { signal: controller.signal } as any);
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new Error(`PDF stream decompression timed out after ${Math.round(timeoutMs / 1000)}s`);
+        }
+      }
+    }
+    return bytes;
+  } finally {
+    clearTimeout(timer);
   }
-  return bytes;
 }
 
 function decodePdfHex(hex: string) {
@@ -151,16 +162,23 @@ function decodePdfHex(hex: string) {
   return out;
 }
 
-async function pdfToText(bytes: ArrayBuffer) {
+async function pdfToText(bytes: ArrayBuffer, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
   if (bytes.byteLength > MAX_PDF_BYTES) {
     throw new Error(`PDF is too large to process safely (${Math.round(bytes.byteLength / 1024 / 1024)}MB > ${Math.round(MAX_PDF_BYTES / 1024 / 1024)}MB)`);
   }
+
   const raw = new Uint8Array(bytes);
   const latin = new TextDecoder("latin1").decode(raw);
   const chunks: string[] = [];
   let extractedLength = 0;
   let cursor = 0;
   let streamCount = 0;
+
+  const checkDeadline = () => {
+    if (Date.now() > deadline) throw new Error(`PDF text extraction timed out after ${Math.round(timeoutMs / 1000)}s`);
+  };
+
   const pushChunk = (value: string) => {
     if (!value || extractedLength >= MAX_EXTRACTED_TEXT) return;
     const remaining = MAX_EXTRACTED_TEXT - extractedLength;
@@ -169,8 +187,42 @@ async function pdfToText(bytes: ArrayBuffer) {
     extractedLength += piece.length;
   };
 
+  // Keep individual PDF text-operator scans bounded. A malformed stream can
+  // otherwise make a single regex scan monopolise the Worker event loop.
+  const extractTextOperators = (text: string) => {
+    const MAX_BLOCK = 512 * 1024;
+    let pos = 0;
+    while (pos < text.length) {
+      checkDeadline();
+      const btAt = text.indexOf("BT", pos);
+      if (btAt < 0) break;
+      const etAt = text.indexOf("ET", btAt + 2);
+      const blockEnd = etAt >= 0 ? Math.min(etAt, btAt + MAX_BLOCK) : Math.min(text.length, btAt + MAX_BLOCK);
+      const block = text.slice(btAt + 2, blockEnd);
+
+      for (const m of block.matchAll(/\((?:\\.|[^\\)])*\)\s*Tj/g)) {
+        checkDeadline();
+        pushChunk(decodePdfLiteral(m[0].replace(/\)\s*Tj$/, "").replace(/^\(/, "")));
+      }
+      for (const m of block.matchAll(/\[(.*?)\]\s*TJ/g)) {
+        checkDeadline();
+        for (const part of m[1].matchAll(/\((?:\\.|[^\\)])*\)/g)) {
+          checkDeadline();
+          pushChunk(decodePdfLiteral(part[0].slice(1, -1)));
+        }
+      }
+      for (const m of block.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)) {
+        checkDeadline();
+        pushChunk(decodePdfHex(m[1]));
+      }
+      pos = etAt >= 0 ? etAt + 2 : blockEnd;
+    }
+  };
+
   while (cursor < latin.length) {
+    checkDeadline();
     if (++streamCount > MAX_PDF_STREAMS) break;
+
     const streamAt = latin.indexOf("stream", cursor);
     if (streamAt < 0) break;
     const dictStart = Math.max(0, latin.lastIndexOf("obj", streamAt - 1) - 1500);
@@ -178,36 +230,45 @@ async function pdfToText(bytes: ArrayBuffer) {
     let dataStart = streamAt + 6;
     if (latin[dataStart] === "\r") dataStart++;
     if (latin[dataStart] === "\n") dataStart++;
+
     const endAt = latin.indexOf("endstream", dataStart);
     if (endAt < 0) break;
 
-    const rawLength = Math.min(endAt - dataStart, MAX_PDF_STREAM_BYTES);
+    const rawStreamLength = endAt - dataStart;
+    const rawLength = Math.min(rawStreamLength, MAX_PDF_STREAM_BYTES);
     const data = raw.slice(dataStart, dataStart + rawLength);
-    const decoded = /\/FlateDecode/i.test(dict) ? await inflate(data) : data;
-    const text = new TextDecoder("latin1").decode(decoded);
 
-    for (const bt of text.matchAll(/BT([\s\S]*?)ET/g)) {
-      const block = bt[1];
-      for (const m of block.matchAll(/\((?:\\.|[^\\)])*\)\s*Tj/g)) {
-        pushChunk(decodePdfLiteral(m[0].replace(/\)\s*Tj$/, "").replace(/^\(/, "")));
-      }
-      for (const m of block.matchAll(/\[(.*?)\]\s*TJ/g)) {
-        for (const part of m[1].matchAll(/\((?:\\.|[^\\)])*\)/g)) pushChunk(decodePdfLiteral(part[0].slice(1, -1)));
-      }
-      for (const m of block.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)) pushChunk(decodePdfHex(m[1]));
+    let decoded: Uint8Array;
+    if (/\/FlateDecode/i.test(dict)) {
+      decoded = await inflate(data, 8_000);
+    } else {
+      decoded = data;
     }
+
+    checkDeadline();
+    // Avoid allocating/scanning enormous decoded streams. Financial text
+    // streams normally contain useful text near their beginning; the global
+    // extracted-text limit provides another safety bound.
+    const boundedDecoded = decoded.length > 4 * 1024 * 1024 ? decoded.slice(0, 4 * 1024 * 1024) : decoded;
+    const streamText = new TextDecoder("latin1").decode(boundedDecoded);
+    extractTextOperators(streamText);
+
     cursor = endAt + 9;
   }
 
+  checkDeadline();
   return cleanText(chunks.join(" "));
 }
 
 async function responseToText(body: ArrayBuffer, contentType: string) {
   const bytes = new Uint8Array(body);
   if (/pdf/i.test(contentType) || new TextDecoder("latin1").decode(bytes.slice(0, 5)) === "%PDF-") {
-    return await withTimeout(pdfToText(body), 45_000, "PDF text extraction timed out after 45s");
+    return await pdfToText(body, 45_000);
   }
-  return htmlTextForScan(new TextDecoder("utf-8", { fatal:false }).decode(bytes));
+  // Bound HTML processing too; a portal page should never need tens of MB of
+  // HTML to identify its report links.
+  const bounded = bytes.length > 8 * 1024 * 1024 ? bytes.slice(0, 8 * 1024 * 1024) : bytes;
+  return htmlTextForScan(new TextDecoder("utf-8", { fatal:false }).decode(bounded));
 }
 
 function parseNumber(raw: string) {
@@ -470,7 +531,12 @@ async function rebuildBankAnalysis(env: Env, bankId: number, countryId: number) 
   await env.DB.prepare("UPDATE banks SET health_score=?,summary=?,updated_at=? WHERE id=?").bind(score, summary, now, bankId).run();
 }
 
-export async function processReport(env: Env, source: Source, report: ReportLink) {
+export async function processReport(
+  env: Env,
+  source: Source,
+  report: ReportLink,
+  options: { rebuild?: boolean } = {},
+) {
   // A report may already exist from an earlier crawler version. Re-use it only
   // when the same hash has already produced published metrics. If the document
   // exists but extraction produced zero values, re-process it automatically.
@@ -558,7 +624,11 @@ export async function processReport(env: Env, source: Source, report: ReportLink
     documentId = Number(inserted.meta?.last_row_id || 0);
   }
 
-  const metrics = extractFinancialMetrics(text);
+  // Keep metric regex scans bounded. Running every metric regex across several
+  // megabytes of PDF text can monopolise a Worker even after PDF extraction
+  // itself has completed.
+  const metricText = text.length > 2 * 1024 * 1024 ? text.slice(0, 2 * 1024 * 1024) : text;
+  const metrics = extractFinancialMetrics(metricText);
   await env.DB.prepare(
     `INSERT INTO financial_extractions
      (bank_id,source_id,source_url,content_hash,period_label,status,records_found,created_at)
@@ -581,7 +651,7 @@ export async function processReport(env: Env, source: Source, report: ReportLink
     ).run();
   }
 
-  if (metrics.length) {
+  if (metrics.length && options.rebuild !== false) {
     await rebuildLatestMetrics(env,source.bank_id);
     const bank=await env.DB.prepare("SELECT country_id FROM banks WHERE id=?").bind(source.bank_id).first<any>();
     if(bank) await rebuildBankAnalysis(env,source.bank_id,Number(bank.country_id));
@@ -657,7 +727,16 @@ export async function reprocessStoredReports(env:Env,countryId:number,progress?:
       }
       if(!source) throw new Error(`No active configured financial portal is available for bank ${doc.bank_name}.`);
       if(Number(source.bank_id)!==Number(doc.bank_id)||Number(source.id)!==Number(doc.source_id)) await env.DB.prepare(`UPDATE financial_documents SET bank_id=?,source_id=?,updated_at=? WHERE id=?`).bind(source.bank_id,source.id,new Date().toISOString(),doc.id).run();
-      const result=await withTimeout(processReport(env,{id:Number(source.id),bank_id:Number(source.bank_id),url:source.url,source_type:source.source_type},{url:doc.report_url,title:doc.report_title||doc.report_url,reportType:doc.report_type||"financial"}), REPORT_PROCESS_TIMEOUT_MS, `Report processing timed out after ${Math.round(REPORT_PROCESS_TIMEOUT_MS/1000)}s`);
+      const result=await withTimeout(
+        processReport(
+          env,
+          {id:Number(source.id),bank_id:Number(source.bank_id),url:source.url,source_type:source.source_type},
+          {url:doc.report_url,title:doc.report_title||doc.report_url,reportType:doc.report_type||"financial"},
+          {rebuild:false},
+        ),
+        REPORT_PROCESS_TIMEOUT_MS,
+        `Report processing timed out after ${Math.round(REPORT_PROCESS_TIMEOUT_MS/1000)}s`,
+      );
       reprocessed++; extracted+=Number(result.extracted||0); published+=Number(result.published||0);
       if(progress)await progress({status:"reprocessing",checked:attempted,total,bankId:source.bank_id,reportId:doc.id,reportTitle:doc.report_title,extracted,published,failed});
     }catch(error){

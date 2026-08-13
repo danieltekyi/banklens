@@ -75,7 +75,9 @@ app.post("/api/auth/forgot", async (c) => {
         method: "POST",
         headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          from: "BankLens <admin@tiwaak.com>",
+          // The sending domain must be verified in Resend, so keep it
+          // configurable rather than tying password resets to one domain.
+          from: c.env.RESET_EMAIL_FROM || "BankLens <admin@odefokitchen.com>",
           to: [u.email],
           subject: "Reset your BankLens password",
           html: `<p>Use this one-time reset link:</p><p><a href="${resetUrl.toString()}">${resetUrl.toString()}</a></p><p>It expires in 30 minutes.</p>`,

@@ -5,6 +5,8 @@ export type Bindings = {
   ASSETS: Fetcher;
   ADMIN_API_KEY?: string;
   RESEND_API_KEY?: string;
+  /** Sender for password-reset email. Must be a Resend-verified domain. */
+  RESET_EMAIL_FROM?: string;
   SESSION_PEPPER?: string;
 };
 

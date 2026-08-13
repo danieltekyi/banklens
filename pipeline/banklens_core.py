@@ -31,7 +31,7 @@ try:
 except Exception:  # pragma: no cover - optional xls fallback
     pd = None
 
-USER_AGENT = "BankLens Local Financial Pipeline/2.0 (+https://banklens.tiwaak.com/methodology)"
+USER_AGENT = "BankLens Local Financial Pipeline/2.0 (+https://banklens.odefokitchen.com/methodology)"
 MAX_TEXT = 4_000_000
 REPORT_EXTENSIONS = (".pdf", ".xls", ".xlsx", ".csv")
 HTML_EXTENSIONS = (".html", ".htm", "")

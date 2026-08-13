@@ -88,7 +88,17 @@ npx wrangler secret put RESEND_API_KEY   # optional, for password-reset email
 npm run deploy
 ```
 
-In Cloudflare, add the custom domain `banklens.tiwaak.com` to the deployed Worker.
+### Custom domain
+
+The app is served at **`banklens.odefokitchen.com`**, declared as a custom domain in `wrangler.jsonc`. Wrangler creates the DNS record and certificate on deploy, so there is no manual dashboard step — but `odefokitchen.com` must already be an active zone in the same Cloudflare account, otherwise the deploy fails with a zone-not-found error.
+
+To serve it somewhere else, edit the `routes` entry in `wrangler.jsonc`. To deploy with no custom domain at all (the `*.workers.dev` URL only), remove that block.
+
+Password-reset email is sent from `RESET_EMAIL_FROM`, which must be on a domain verified in Resend:
+
+```bash
+npx wrangler secret put RESET_EMAIL_FROM   # e.g. BankLens <admin@odefokitchen.com>
+```
 
 For GitHub Actions, add repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 

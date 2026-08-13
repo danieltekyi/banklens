@@ -7,3 +7,4 @@ banklens_data
 .DS_Store
 *.log
 *.pdf
+*.tsbuildinfo

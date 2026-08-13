@@ -5,15 +5,10 @@ import { listBanks, findBank } from "./db";
 import { processReport, reprocessStoredReports, runScan, runScanForCountry } from "./scanner";
 import { digest, hashPassword, requireAdmin, token, verifyPassword } from "./auth";
 import { ensureBankLensSchema, ensureLatestMetrics } from "./schema";
-
-type Bindings = {
-  DB: D1Database;
-  REPORTS: R2Bucket;
-  ASSETS: Fetcher;
-  ADMIN_API_KEY?: string;
-  RESEND_API_KEY?: string;
-  SESSION_PEPPER?: string;
-};
+import { registerAdminCrud } from "./routes/admin-crud";
+import { registerPublicApi } from "./routes/public-api";
+import { registerPipelineApi } from "./routes/pipeline-api";
+import type { Bindings } from "./env";
 
 const app = new Hono<{ Bindings: Bindings }>();
 let schemaReady: Promise<void> | null = null;
@@ -206,9 +201,8 @@ app.post("/api/admin/countries", async (c) => {
   return c.json({ok:true,id:row?.id},201);
 });
 
-app.patch("/api/admin/countries/:id", async (c) => {
-  const { enabled }=await c.req.json(); await c.env.DB.prepare("UPDATE countries SET enabled=? WHERE id=?").bind(enabled?1:0,Number(c.req.param("id"))).run(); return c.json({ok:true});
-});
+// Country updates are handled by registerAdminCrud (partial update + rename +
+// delete). See worker/routes/admin-crud.ts.
 
 app.get("/api/admin/countries/:id/config", async (c) => {
   const countryId=Number(c.req.param("id"));
@@ -230,10 +224,8 @@ app.post("/api/admin/countries/:id/banks", async (c) => {
   return c.json({ok:true,bank},201);
 });
 
-app.patch("/api/admin/banks/:id", async (c) => {
-  const id=Number(c.req.param("id")); const x=await c.req.json();
-  await c.env.DB.prepare("UPDATE banks SET name=?,short_name=?,website=?,active=?,updated_at=? WHERE id=?").bind(x.name,x.shortName||String(x.name||"").slice(0,3).toUpperCase(),x.website||null,x.active===false?0:1,new Date().toISOString(),id).run(); return c.json({ok:true});
-});
+// Bank update/delete are handled by registerAdminCrud, which applies a partial
+// update instead of overwriting every column with undefined.
 
 app.post("/api/admin/banks/:id/sources", async (c) => {
   const bankId=Number(c.req.param("id")); const x=await c.req.json();
@@ -245,7 +237,7 @@ app.post("/api/admin/banks/:id/sources", async (c) => {
   const row=await c.env.DB.prepare("SELECT id FROM sources WHERE bank_id=? AND url=?").bind(bankId,x.url).first<any>(); return c.json({ok:true,id:row?.id},201);
 });
 
-app.delete("/api/admin/sources/:id", async (c) => { await c.env.DB.prepare("UPDATE sources SET active=0 WHERE id=?").bind(Number(c.req.param("id"))).run(); return c.json({ok:true}); });
+// Source amend/remove are handled by registerAdminCrud.
 
 app.post("/api/admin/ghana-starter", async (c) => {
   const now=new Date().toISOString();
@@ -413,6 +405,12 @@ app.get("/api/admin/sources/:id/diagnostics", async (c) => {
 });
 
 app.post("/api/admin/scan", async (c) => c.json(await runScan(c.env)));
+
+// Feature route modules. These are registered after the `/api/admin/*` auth
+// middleware above, so every admin and pipeline route they add is protected.
+registerAdminCrud(app);
+registerPipelineApi(app);
+registerPublicApi(app);
 
 export default {
   fetch: app.fetch,

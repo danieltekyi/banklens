@@ -70,6 +70,13 @@ export async function ensureBankLensSchema(db: D1Database) {
       generated_at TEXT NOT NULL
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_analysis_generated ON bank_analysis(generated_at)`),
+    // Supporting indexes for the cascade delete in routes/admin-crud.ts and for
+    // the public ranking/trend queries in routes/public-api.ts.
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_bank ON financial_records(bank_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_source ON financial_records(source_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_metric_period ON financial_records(metric_key,reporting_period_end,status)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_documents_bank_only ON financial_documents(bank_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_extractions_bank ON financial_extractions(bank_id)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS banklens_latest_metrics (
       bank_id INTEGER PRIMARY KEY,
       assets REAL,

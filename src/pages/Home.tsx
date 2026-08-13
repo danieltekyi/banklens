@@ -1,4 +1,101 @@
-import {ArrowRight,Landmark,Percent,ReceiptText,ShieldCheck,Search} from "lucide-react";import{Link}from"react-router-dom";import{useEffect,useMemo,useState}from"react";import BankBadge from"../components/BankBadge";import Score from"../components/Score";
-type Bank=any;type Country={id:number;name:string;iso2:string;currency:string};
-export default function Home(){const[countries,setCountries]=useState<Country[]>([]),[country,setCountry]=useState(""),[banks,setBanks]=useState<Bank[]>([]),[loading,setLoading]=useState(true),[q,setQ]=useState("");useEffect(()=>{fetch("/api/countries").then(r=>r.json()).then(x=>{const list=x.data||[];setCountries(list);if(list[0])setCountry(String(list[0].id));}).catch(()=>{});},[]);useEffect(()=>{if(!country)return;setLoading(true);fetch(`/api/banks?country=${country}`).then(r=>r.json()).then(x=>setBanks(x.data||[])).catch(()=>setBanks([])).finally(()=>setLoading(false));},[country]);const shown=useMemo(()=>banks.filter(b=>b.name.toLowerCase().includes(q.toLowerCase())),[banks,q]);const scored=banks.filter(b=>b.healthScore>0).sort((a,b)=>b.healthScore-a.healthScore),savings=banks.filter(b=>b.products.savingsRate!=null).sort((a,b)=>b.products.savingsRate-a.products.savingsRate),loans=banks.filter(b=>b.products.loanRate!=null).sort((a,b)=>a.products.loanRate-b.products.loanRate),fees=banks.filter(b=>b.products.transferFee!=null).sort((a,b)=>a.products.transferFee-b.products.transferFee);const top=scored[0],save=savings[0],loan=loans[0],fee=fees[0];const currentCountry=countries.find(c=>String(c.id)===country);const rate=(v:any)=>v==null?"Pending":`${v}%`,money=(v:any)=>v==null?"Pending":`GH₵${Number(v).toFixed(2)}`;return <><section className="hero shell"><div><span className="eyebrow">Independent bank comparison</span><h1>See the bank<br/>behind the brand.</h1><p>Compare financial strength and reported performance using the same underlying reports banks publish themselves.</p><div className="search"><Search size={20}/><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search a bank"/><a href="#rankings" className="button">View results</a></div><div style={{marginTop:12}}><label>Market <select value={country} onChange={e=>setCountry(e.target.value)}>{countries.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label></div></div><div className="hero-card"><div className="between"><div><small>Current market</small><h2>{currentCountry?.name||"Banking overview"}</h2></div></div><div className="snapshot"><div><b>{banks.length}</b><span>Banks tracked</span></div><div><b>{top?.healthScore??"--"}/100</b><span>Top health score</span></div><div><b>{rate(save?.products.savingsRate)}</b><span>Top listed savings</span></div><div><b>{money(fee?.products.transferFee)}</b><span>Lowest transfer fee</span></div></div><p className="hero-note">Every published financial figure has a source report reference.</p></div></section><section className="shell section"><div className="section-head"><div><span className="kicker">Quick answers</span><h2>Choose what matters to you</h2></div><Link to="/compare">Explore full ranking <ArrowRight size={16}/></Link></div><div className="answer-grid"><Answer icon={<ShieldCheck/>} label="Strongest overall" bank={top?.name} value={top?`${top.healthScore}/100`:"Pending"}/><Answer icon={<Percent/>} label="Best listed savings" bank={save?.name} value={rate(save?.products.savingsRate)}/><Answer icon={<Landmark/>} label="Lowest listed loan rate" bank={loan?.name} value={rate(loan?.products.loanRate)}/><Answer icon={<ReceiptText/>} label="Lowest transfer fee" bank={fee?.name} value={money(fee?.products.transferFee)}/></div></section><section id="rankings" className="shell section"><div className="panel"><div className="section-head"><div><span className="kicker">Country ranking</span><h2>{currentCountry?.name||"Bank"} at a glance</h2></div><Link to="/compare">Compare financial elements <ArrowRight size={16}/></Link></div>{loading?<div className="loading">Loading bank data...</div>:<div className="table-wrap"><table><thead><tr><th>Bank</th><th>Health</th><th>Assets</th><th>Deposits</th><th>Profit</th><th>Capital</th><th>NPL</th><th/></tr></thead><tbody>{shown.map(b=><tr key={b.id}><td><BankBadge bank={b}/></td><td><Score value={b.healthScore}/></td><td>{b.metrics.assets==null?"Pending":`GH₵${b.metrics.assets}bn`}</td><td>{b.metrics.deposits==null?"Pending":`GH₵${b.metrics.deposits}bn`}</td><td>{b.metrics.profit==null?"Pending":`GH₵${b.metrics.profit}bn`}</td><td>{rate(b.metrics.capitalAdequacy)}</td><td>{rate(b.metrics.npl)}</td><td><Link to={`/banks/${b.slug}`}>View</Link></td></tr>)}</tbody></table></div>}</div></section><section className="method-strip"><div className="shell steps"><Step n="1" title="Configure" text="Each bank is linked to its official financial-report portal."/><Step n="2" title="Track" text="Cron detects and downloads new reports automatically."/><Step n="3" title="Compare" text="Latest values, trends and rankings remain traceable to source reports."/></div></section></>}
-function Answer({icon,label,bank,value}:{icon:React.ReactNode;label:string;bank?:string;value:string}){return <article className="answer">{icon}<h3>{label}</h3><p>{bank||"Pending"}</p><b>{value}</b></article>}function Step({n,title,text}:{n:string;title:string;text:string}){return <article><span>{n}</span><h3>{title}</h3><p>{text}</p></article>}
+import { ArrowRight, BadgeCheck, Database, FileText, Globe2, LineChart, Search, ShieldAlert } from "lucide-react";
+import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import BankBadge from "../components/BankBadge";
+import CountrySelect from "../components/CountrySelect";
+import Score from "../components/Score";
+import SourceLink from "../components/SourceLink";
+import { EmptyState, ErrorState, LoadingBlock } from "../components/States";
+import { api } from "../lib/api";
+import { formatDate, formatValue } from "../lib/format";
+import { useCountry } from "../hooks/useCountry";
+import type { Bank, Overview, RankingRow } from "../types";
+
+export default function Home() {
+  const { countries, country, setCountry, currentCountry } = useCountry();
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [leaders, setLeaders] = useState<RankingRow[]>([]);
+  const [banks, setBanks] = useState<Bank[]>([]);
+  const [demo, setDemo] = useState(false);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!country) return;
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    Promise.all([api.overview(country), api.rankings(new URLSearchParams({ country, metric: "overall" })), api.banks(country)])
+      .then(([overviewResult, rankingResult, bankResult]) => {
+        if (!alive) return;
+        setOverview(overviewResult.data);
+        setLeaders(rankingResult.data || []);
+        setBanks(bankResult.data || []);
+        setDemo(Boolean(bankResult.meta?.demo));
+      })
+      .catch((err: Error) => alive && setError(err.message || "Could not load the public overview."))
+      .finally(() => alive && setLoading(false));
+    return () => { alive = false; };
+  }, [country]);
+
+  const shown = useMemo(() => banks.filter((bank) => bank.name.toLowerCase().includes(query.toLowerCase())).slice(0, 5), [banks, query]);
+  const top = leaders[0];
+
+  return (
+    <>
+      <section className="hero shell">
+        <div>
+          <span className="eyebrow">Published-source bank comparison</span>
+          <h1>Understand which banks are actually strong.</h1>
+          <p>BankLens turns audited reports into plain-English comparisons, rankings and trend charts. Every number links back to the bank's own published source.</p>
+          <div className="hero-actions">
+            <Link className="button" to="/rankings"><LineChart size={18} /> View rankings</Link>
+            <Link className="button secondary" to="/decide">Choose a bank</Link>
+          </div>
+          <div className="search" role="search">
+            <Search size={20} aria-hidden="true" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a bank in this country" aria-label="Search banks" />
+          </div>
+          {shown.length > 0 && <div className="quick-results">{shown.map((bank) => <Link key={bank.slug} to={`/banks/${bank.slug}`}>{bank.name}<ArrowRight size={14} /></Link>)}</div>}
+        </div>
+        <aside className="hero-card" aria-label="Market overview">
+          <CountrySelect countries={countries} value={country} onChange={setCountry} label="Viewing" />
+          {loading ? <LoadingBlock label="Loading market overview" /> : error ? <ErrorState message={error} /> : overview ? (
+            <>
+              {demo && <div className="demo-banner"><ShieldAlert size={18} /> Sample data is showing. These are not published results.</div>}
+              <h2>{currentCountry?.name || "Selected market"}</h2>
+              <div className="snapshot">
+                <Stat value={overview.banks} label="Banks tracked" />
+                <Stat value={overview.reports} label="Source reports" />
+                <Stat value={overview.valuesPublished} label="Published values" />
+                <Stat value={formatDate(overview.latestPeriod)} label="Latest period" />
+              </div>
+              {top ? <div className="hero-note"><b>Current leader:</b> {top.name} <Score value={top.value} coverage={top.coverage} /></div> : <p className="hero-note">No rankings yet. An administrator needs to publish bank figures for this country.</p>}
+            </>
+          ) : <EmptyState title="No country configured" message="Ask an administrator to add a country and its commercial banks." />}
+        </aside>
+      </section>
+
+      <section className="shell section">
+        <div className="section-head"><div><span className="kicker">Start here</span><h2>Answer practical questions quickly</h2></div></div>
+        <div className="answer-grid">
+          <Answer icon={<BadgeCheck />} title="Who looks strongest?" text="Rank by overall financial strength, with coverage caveats." to="/rankings" />
+          <Answer icon={<Database />} title="Can I trust the number?" text="Open each source report beside each value." to="/methodology" />
+          <Answer icon={<Globe2 />} title="How do peers compare?" text="Compare two to six banks side-by-side." to="/compare" />
+          <Answer icon={<FileText />} title="Which product fits?" text="Weigh rates against bank strength before deciding." to="/decide" />
+        </div>
+      </section>
+
+      <section className="shell section">
+        <div className="panel">
+          <div className="section-head"><div><span className="kicker">Leaderboard preview</span><h2>Top reported strength scores</h2></div><Link to="/rankings">See all <ArrowRight size={16} /></Link></div>
+          {loading ? <LoadingBlock /> : leaders.length ? <div className="table-wrap"><table className="responsive-table"><thead><tr><th>Rank</th><th>Bank</th><th>Score</th><th>Coverage</th><th>Source evidence</th></tr></thead><tbody>{leaders.slice(0, 5).map((row) => <tr key={row.slug}><td data-label="Rank">#{row.rank}</td><td data-label="Bank"><BankBadge bank={{ name: row.name, shortName: row.shortName || row.name.slice(0, 2), color: row.color || "#08715f" }} /></td><td data-label="Score"><Score value={row.value} coverage={row.coverage} /></td><td data-label="Coverage">{row.coverage ?? 0}%</td><td data-label="Source evidence">{row.sources?.[0] ? <SourceLink url={row.sources[0].url} title={row.sources[0].title} /> : "Not reported"}</td></tr>)}</tbody></table></div> : <EmptyState title="No published rankings yet" message="Once reports are processed, the leaderboard will appear here with source links." />}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function Stat({ value, label }: { value: number | string; label: string }) { return <div><b>{value}</b><span>{label}</span></div>; }
+function Answer({ icon, title, text, to }: { icon: React.ReactNode; title: string; text: string; to: string }) { return <Link className="answer" to={to}>{icon}<h3>{title}</h3><p>{text}</p><b>Open <ArrowRight size={16} /></b></Link>; }

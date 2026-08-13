@@ -1,1 +1,0 @@
-{"root":["./worker/auth.ts","./worker/db.ts","./worker/demo.ts","./worker/discovery.ts","./worker/index.ts","./worker/scanner.ts","./worker/schema.ts","./env.d.ts"],"version":"5.8.3"}

@@ -1,8 +1,11 @@
-/* Mobile bottom nav styles */
-@media (max-width:768px){
-  .desktop-nav,.desktop-cta{display:none}
-  .menu{display:block}
-  .mobile-nav{display:flex;position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,white,#f7faf7);padding:10px 20px;border-top:1px solid #e6eee9;gap:12px;justify-content:space-around;z-index:30}
-  .mobile-nav a{padding:10px 12px;border-radius:10px;background:transparent}
-  main{padding-bottom:76px}
+/* Mobile bottom navigation and small-screen table/card behaviour. */
+@media (max-width: 768px){
+  .shell{width:min(100% - 28px,1180px)}
+  main{padding-bottom:calc(92px + env(safe-area-inset-bottom))}
+  .mobile-nav{position:fixed;left:0;right:0;bottom:0;z-index:40;display:grid;grid-template-columns:repeat(5,1fr);gap:4px;padding:8px 8px calc(8px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);border-top:1px solid #dce7e2;box-shadow:0 -18px 40px rgba(6,63,54,.12);backdrop-filter:blur(16px)}
+  .mobile-nav a{min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border-radius:16px;color:#60706a;font-weight:800;font-size:11px}
+  .mobile-nav a.active{background:#e8f6f1;color:#063f36}
+  .mobile-nav svg{flex:0 0 auto}
+  .hero-card{padding:20px}.snapshot{grid-template-columns:1fr}.search{align-items:stretch}.search input{min-height:44px}.selectors{align-items:stretch;flex-direction:column}.field.compact,.field input,.field select,.selectors select{width:100%;min-width:0}.bank-picker{display:grid;grid-template-columns:1fr 1fr}.responsive-table{min-width:0}.responsive-table thead{display:none}.responsive-table,.responsive-table tbody,.responsive-table tr,.responsive-table td,.responsive-table th{display:block;width:100%}.responsive-table tr{background:#fff;border:1px solid #e2ebe6;border-radius:18px;margin:12px 0;padding:8px}.responsive-table td,.responsive-table th[scope=row]{border:0;padding:10px 8px}.responsive-table td::before,.responsive-table th[scope=row]::before{content:attr(data-label);display:block;color:#718079;text-transform:uppercase;letter-spacing:.08em;font-size:11px;font-weight:900;margin-bottom:4px}.compare-table td,.compare-table th[scope=row]{border-top:1px solid #edf2ef}.compare-bank-row{grid-template-columns:1fr}.page{padding-bottom:34px}.panel{padding:20px}.product-card{padding:20px}
 }
+@media (max-width:390px){.mobile-nav a{font-size:10px}.bank-picker{grid-template-columns:1fr}.hero h1,.page h1{font-size:36px}.button{width:100%}.hero-actions{width:100%}}

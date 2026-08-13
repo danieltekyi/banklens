@@ -1,0 +1,269 @@
+/*
+ * Admin console styling.
+ *
+ * Kept separate from styles.css so the operator-facing console can evolve
+ * without touching the public design system. Uses the same design tokens.
+ */
+
+.admin-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.form-error {
+  background: #fdf0f0;
+  border: 1px solid #f0cccc;
+  color: var(--bad);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 14px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.empty-state {
+  color: var(--muted);
+  background: #f7faf9;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  padding: 26px;
+  text-align: center;
+  margin-top: 16px;
+}
+
+/* Forms -------------------------------------------------------------- */
+
+.admin-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  align-items: end;
+}
+
+.admin-form label {
+  display: block;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.admin-form input,
+.admin-form select,
+.inline-edit input,
+.inline-edit select,
+.inline-edit-actions input {
+  display: block;
+  width: 100%;
+  margin-top: 7px;
+  padding: 12px;
+  border: 1px solid #cfdbd5;
+  border-radius: 11px;
+  background: #fff;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.admin-form input:focus-visible,
+.admin-form select:focus-visible,
+.inline-edit input:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+}
+
+.admin-form .button {
+  min-height: 46px;
+}
+
+.country-form {
+  grid-template-columns: 2fr 0.6fr 0.8fr 1.6fr auto;
+}
+
+.bank-form {
+  grid-template-columns: 1.4fr 2.4fr auto;
+}
+
+.product-form {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.product-form .wide {
+  grid-column: span 2;
+}
+
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.checkbox-inline input {
+  width: 18px;
+  height: 18px;
+}
+
+/* Inline row editing -------------------------------------------------- */
+
+.inline-edit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  align-items: end;
+  padding: 6px 0;
+}
+
+.inline-edit label {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.inline-edit-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inline-edit-actions input {
+  flex: 1;
+  min-width: 220px;
+  margin-top: 0;
+}
+
+.row-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Destructive actions must read as destructive at a glance. The public
+ * stylesheet is injected after this one, so raise specificity to win. */
+.row-actions .text-button.danger,
+button.text-button.danger {
+  color: var(--bad);
+}
+
+.text-button.small {
+  font-size: 13px;
+}
+
+.text-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Secondary identifiers (slug, category) sit under their label, not beside it. */
+.admin-form + .table-wrap td small,
+.modal-card td small,
+.page td small {
+  display: block;
+  color: var(--muted);
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+/* Reporting portals --------------------------------------------------- */
+
+.portal-row {
+  padding: 10px 0;
+  border-bottom: 1px solid #eef2f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  word-break: break-all;
+}
+
+.portal-row:last-child {
+  border-bottom: 0;
+}
+
+.portal-row a {
+  color: var(--brand-2);
+  font-weight: 600;
+}
+
+.portal-removed a {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+/* Modals -------------------------------------------------------------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(6, 35, 30, 0.45);
+  overflow-y: auto;
+  padding: 24px 0;
+  backdrop-filter: blur(3px);
+}
+
+.modal-card {
+  background: var(--panel);
+  border-radius: 20px;
+  padding: 28px;
+  margin: 0 auto;
+  max-width: 1120px;
+  box-shadow: var(--shadow);
+}
+
+.detail-cell {
+  max-width: 380px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* Responsive ---------------------------------------------------------- */
+
+@media (max-width: 950px) {
+  .country-form,
+  .bank-form,
+  .product-form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .product-form .wide {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 620px) {
+  .country-form,
+  .bank-form,
+  .product-form {
+    grid-template-columns: 1fr;
+  }
+  .product-form .wide {
+    grid-column: span 1;
+  }
+  .modal {
+    padding: 0;
+  }
+  .modal-card {
+    border-radius: 0;
+    padding: 20px 16px;
+    min-height: 100vh;
+  }
+  .admin-actions {
+    width: 100%;
+  }
+  .admin-actions .button {
+    flex: 1;
+  }
+  .inline-edit-actions input {
+    min-width: 0;
+  }
+}

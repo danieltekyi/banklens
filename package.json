@@ -11,7 +11,8 @@
     "cf-typegen": "wrangler types",
     "db:local": "wrangler d1 migrations apply banklens-db --local",
     "db:remote": "wrangler d1 migrations apply banklens-db --remote",
-    "check": "tsc -b"
+    "check": "tsc -b",
+    "smoke": "node scripts/api-smoke.mjs"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.7.2",

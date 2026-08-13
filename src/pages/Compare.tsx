@@ -1,4 +1,57 @@
-import {useEffect,useMemo,useState} from "react";import{Link}from"react-router-dom";import{useBanks}from"../hooks/useBanks";import BankBadge from"../components/BankBadge";
-type Country={id:number;name:string;iso2:string;currency:string};type Rank={rank:number;slug:string;name:string;country_name:string;value:number;unit?:string;reporting_period_end?:string;source_url?:string};
-const METRICS=[['health_score','Overall health score'],['assets','Total assets'],['deposits','Deposits'],['profit','Profit after tax'],['loans','Loans and advances'],['equity','Total equity'],['liabilities','Total liabilities'],['revenue','Revenue'],['net_interest_income','Net interest income'],['impairment','Credit impairment charge'],['capital_adequacy','Capital adequacy'],['liquidity','Liquidity'],['npl','NPL ratio'],['roe','Return on equity'],['roa','Return on assets'],['cost_to_income','Cost-to-income ratio']];
-export default function Compare(){const{banks}=useBanks();const[countries,setCountries]=useState<Country[]>([]),[country,setCountry]=useState(""),[metric,setMetric]=useState("health_score"),[rows,setRows]=useState<Rank[]>([]),[a,setA]=useState(""),[b,setB]=useState("");useEffect(()=>{fetch("/api/countries").then(r=>r.json()).then(x=>{setCountries(x.data||[]);if(!country&&x.data?.[0])setCountry(String(x.data[0].id))}).catch(()=>{});},[]);useEffect(()=>{const q=new URLSearchParams({metric});if(country)q.set("country",country);fetch(`/api/compare/rankings?${q}`).then(r=>r.json()).then(x=>setRows(x.data||[])).catch(()=>setRows([]));},[country,metric]);useEffect(()=>{if(rows.length){setA(rows[0]?.slug||"");setB(rows[1]?.slug||rows[0]?.slug||"")}},[rows]);const selected=useMemo(()=>[rows.find(x=>x.slug===a),rows.find(x=>x.slug===b)].filter(Boolean) as Rank[],[rows,a,b]);const metricLabel=METRICS.find(x=>x[0]===metric)?.[1]||metric;return <section className="shell page"><span className="kicker">Sector comparison</span><h1>Bank comparison & ranking</h1><p className="lead">Rank banks across a country or compare a specific financial-report element. Rankings use the latest published reporting period available for each bank.</p><div className="selectors" style={{display:"flex",gap:10,flexWrap:"wrap"}}><select value={country} onChange={e=>setCountry(e.target.value)}><option value="">All countries</option>{countries.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><select value={metric} onChange={e=>setMetric(e.target.value)}>{METRICS.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></div><div className="panel" style={{marginTop:24}}><div className="section-head"><div><span className="kicker">Ranking</span><h2>{metricLabel}</h2></div></div>{rows.length===0?<div className="notice"><b>No published values yet.</b><p>Run analysis after configuring reporting portals.</p></div>:<div className="table-wrap"><table><thead><tr><th>Rank</th><th>Bank</th><th>Country</th><th>Value</th><th>Period</th><th>Reference</th></tr></thead><tbody>{rows.map(r=><tr key={`${r.slug}-${r.rank}`}><td><b>#{r.rank}</b></td><td><Link to={`/banks/${r.slug}`}><b>{r.name}</b></Link></td><td>{r.country_name}</td><td><b>{r.value}</b> {r.unit||""}</td><td>{r.reporting_period_end||"—"}</td><td>{r.source_url?<a href={r.source_url} target="_blank" rel="noreferrer">Report ↗</a>:"—"}</td></tr>)}</tbody></table></div>}</div><div className="panel" style={{marginTop:24}}><div className="section-head"><div><span className="kicker">Side by side</span><h2>Compare selected banks</h2></div></div>{rows.length<1?<div className="notice">Select a country/metric with published data.</div>:<><div className="selectors"><select value={a} onChange={e=>setA(e.target.value)}>{rows.map(x=><option key={x.slug} value={x.slug}>{x.name}</option>)}</select><span>versus</span><select value={b} onChange={e=>setB(e.target.value)}>{rows.map(x=><option key={x.slug} value={x.slug}>{x.name}</option>)}</select></div>{selected.length===2&&<div className="compare-grid"><div className="compare-head"/>{selected.map(x=><div className="compare-head" key={x.slug}><b>{x.name}</b></div>)}{[[metricLabel,(x:Rank)=>`${x.value} ${x.unit||""}`]].map(([label,fn])=><><div className="metric-label" key="metric">{String(label)}</div>{selected.map(x=><div className="metric-value" key={x.slug}>{(fn as any)(x)}</div>)}</>)}</div>}</>}</div></section>}
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import BankBadge from "../components/BankBadge";
+import CountrySelect from "../components/CountrySelect";
+import Score from "../components/Score";
+import SourceLink from "../components/SourceLink";
+import { EmptyState, ErrorState, LoadingBlock } from "../components/States";
+import { api } from "../lib/api";
+import { directionCopy, formatValue } from "../lib/format";
+import { useCountry } from "../hooks/useCountry";
+import type { Bank, CompareResponse } from "../types";
+
+export default function Compare() {
+  const { countries, country, setCountry } = useCountry();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [banks, setBanks] = useState<Bank[]>([]);
+  const [selected, setSelected] = useState<string[]>(() => (searchParams.get("banks") || "").split(",").filter(Boolean));
+  const [year, setYear] = useState(searchParams.get("year") || "");
+  const [years, setYears] = useState<string[]>([]);
+  const [result, setResult] = useState<CompareResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!country) return;
+    api.banks(country).then((r) => {
+      setBanks(r.data || []);
+      setSelected((prev) => prev.length >= 2 ? prev : (r.data || []).slice(0, 2).map((b) => b.slug));
+    }).catch(() => setBanks([]));
+    api.periods(country).then((r) => setYears(r.years || [])).catch(() => setYears([]));
+  }, [country]);
+
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (selected.length) next.set("banks", selected.join(","));
+    if (year) next.set("year", year);
+    setSearchParams(next, { replace: true });
+  }, [selected, year, setSearchParams]);
+
+  useEffect(() => {
+    if (selected.length < 2) { setResult(null); return; }
+    const params = new URLSearchParams({ banks: selected.join(",") });
+    if (year) params.set("year", year);
+    setLoading(true); setError(null);
+    api.compare(params).then(setResult).catch((err: Error) => { setResult(null); setError(err.message); }).finally(() => setLoading(false));
+  }, [selected, year]);
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const toggle = (slug: string) => setSelected((prev) => prev.includes(slug) ? prev.filter((x) => x !== slug) : prev.length < 6 ? [...prev, slug] : prev);
+
+  return <section className="shell page"><span className="kicker">Side-by-side evidence</span><h1>Compare banks</h1><p className="lead">Choose two to six banks. The URL updates as you choose, so this comparison can be shared.</p><div className="selectors"><CountrySelect countries={countries} value={country} onChange={setCountry} /><label className="field compact"><span>Year</span><select value={year} onChange={(e) => setYear(e.target.value)}><option value="">Latest available</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select></label></div><div className="bank-picker" role="group" aria-label="Select banks to compare">{banks.map((bank) => <button key={bank.slug} className={`choice-chip ${selectedSet.has(bank.slug) ? "on" : ""}`} onClick={() => toggle(bank.slug)} aria-pressed={selectedSet.has(bank.slug)} disabled={!selectedSet.has(bank.slug) && selected.length >= 6}>{bank.shortName || bank.name}<small>{selectedSet.has(bank.slug) ? "Selected" : selected.length >= 6 ? "Limit reached" : "Add"}</small></button>)}</div>{selected.length < 2 ? <EmptyState title="Select at least two banks" message="Choose up to six banks to compare each metric and source side by side." /> : loading ? <LoadingBlock /> : error ? <ErrorState message={error} /> : result ? <Comparison result={result} /> : null}</section>;
+}
+
+function Comparison({ result }: { result: CompareResponse }) {
+  if (!result.data.comparison.length) return <EmptyState title="No comparable figures" message="These banks do not have published values in the selected period yet." />;
+  return <div className="panel compare-panel"><div className="compare-bank-row">{result.data.banks.map((bank) => <article key={bank.slug} className="compare-bank-card"><BankBadge bank={bank} meta={bank.countryName} /><Score value={bank.score} coverage={bank.coverage} />{bank.coverage < 60 && <p className="source-note">Low coverage: only {bank.coverage}% of scoring weight has sourced data.</p>}</article>)}</div><div className="table-wrap"><table className="responsive-table compare-table"><thead><tr><th>Metric</th>{result.data.banks.map((bank) => <th key={bank.slug}>{bank.shortName || bank.name}</th>)}</tr></thead><tbody>{result.data.comparison.map((row) => <tr key={row.metric.key}><th scope="row" data-label="Metric"><span>{row.metric.label}</span><small>{directionCopy(row.metric.direction)}</small></th>{row.cells.map((cell) => <td key={`${row.metric.key}-${cell.slug}`} data-label={result.data.banks.find((b) => b.slug === cell.slug)?.name || cell.slug} className={row.leader === cell.slug ? "leader-cell" : ""}><b>{formatValue(cell.value, cell.unit)}</b>{row.leader === cell.slug && <span className="pill success">Leader</span>}<small>{cell.periodLabel || cell.reportingPeriodEnd || "Period not reported"}</small><SourceLink compact url={cell.sourceUrl} title={cell.sourceTitle} /></td>)}</tr>)}</tbody></table></div><p className="source-note"><b>Method:</b> Leaders are highlighted only when the metric direction is clear. Each cell cites its own report.</p></div>;
+}

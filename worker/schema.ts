@@ -70,6 +70,48 @@ export async function ensureBankLensSchema(db: D1Database) {
       generated_at TEXT NOT NULL
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_analysis_generated ON bank_analysis(generated_at)`),
+    // bank_products and admin_audit_log are also created by migration 0007.
+    // They are repeated here on purpose: the GitHub Actions workflow deploys the
+    // Worker on every push to main but does NOT run migrations, so a deploy can
+    // reach a database that has not been migrated yet. Without this, the bank
+    // profile, products and recommendation endpoints return 500 until someone
+    // remembers to run `npm run db:remote`. Both statements are idempotent, so
+    // running the migration as well is harmless.
+    db.prepare(`CREATE TABLE IF NOT EXISTS bank_products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bank_id INTEGER NOT NULL,
+      product_name TEXT NOT NULL,
+      product_type TEXT NOT NULL,
+      category TEXT,
+      rate REAL,
+      rate_note TEXT,
+      min_amount REAL,
+      max_amount REAL,
+      tenor_months INTEGER,
+      fee REAL,
+      fee_note TEXT,
+      eligibility TEXT,
+      currency TEXT,
+      source_url TEXT,
+      source_title TEXT,
+      effective_date TEXT,
+      status TEXT NOT NULL DEFAULT 'published',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_products_bank ON bank_products(bank_id,product_type,status)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_bank_products_type_rate ON bank_products(product_type,status,rate)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS admin_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor TEXT,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id INTEGER,
+      entity_label TEXT,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log(created_at DESC)`),
     // Supporting indexes for the cascade delete in routes/admin-crud.ts and for
     // the public ranking/trend queries in routes/public-api.ts.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_financial_records_bank ON financial_records(bank_id)`),
